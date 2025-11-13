@@ -19,6 +19,11 @@ class AudioVADProcessor extends AudioWorkletProcessor {
   f_min = null;
   sfm_min = null;
 
+  // Accumulators for averaging
+  e_sum = 0;
+  f_sum = 0;
+  sfm_sum = 0;
+
   baselines_ready = false;
 
   sample_rate;
@@ -193,43 +198,28 @@ class AudioVADProcessor extends AudioWorkletProcessor {
     // just safety check
     sfm = isFinite(sfm) ? sfm : 0;
 
-    // set initial min values from first 30 frames
+    // Collect baselines by AVERAGING first 30 frames (not minimum!)
     if (!this.baselines_ready) {
       if (this.frame_counter <= 30) {
-        // Collect baseline values during initialization
-        if (this.e_min === null) {
-          this.e_min = energy;
-        } else {
-          this.e_min = Math.min(this.e_min, energy);
-        }
-
-        if (this.f_min === null) {
-          this.f_min = f_max_hz;
-        } else {
-          this.f_min = Math.min(this.f_min, f_max_hz);
-        }
-
-        if (this.sfm_min === null) {
-          this.sfm_min = sfm;
-        } else {
-          this.sfm_min = Math.min(this.sfm_min, sfm);
-        }
+        // Accumulate values
+        this.e_sum += energy;
+        this.f_sum += f_max_hz;
+        this.sfm_sum += sfm;
 
         if (this.frame_counter === 30) {
-          // Check if we actually got real baseline values
-          if (this.e_min > 0 && this.f_min > 0) {
-            this.baselines_ready = true;
-            console.log('✅ VAD baselines established:', {
-              e_min: this.e_min,
-              f_min: this.f_min,
-              sfm_min: this.sfm_min
-            });
-          } else {
-            console.warn('⚠️ Baselines are 0 - continuing to collect data...');
-            // Keep collecting for another 30 frames
-            this.frame_counter = 0;
-          }
+          // Calculate averages
+          this.e_min = this.e_sum / 30;
+          this.f_min = this.f_sum / 30;
+          this.sfm_min = this.sfm_sum / 30;
+
+          this.baselines_ready = true;
+          console.log('✅ VAD baselines (AVERAGED from 30 frames):', {
+            e_min: this.e_min,
+            f_min: this.f_min,
+            sfm_min: this.sfm_min
+          });
         }
+        return true; // Don't make decisions yet
       }
     }
 
@@ -256,10 +246,8 @@ class AudioVADProcessor extends AudioWorkletProcessor {
       count++;
     }
 
-    // SIMPLE ENERGY-BASED DETECTION - ignore baselines completely
-    const isSpeech = energy > 0.01; // Simple absolute threshold
-
-    if (isSpeech) {
+    // Require at least 2 criteria to match
+    if (count > 1) {
       this.is_speech_frame_counter++;
       this.is_silent_frame_counter = 0;
     } else {
