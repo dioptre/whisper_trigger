@@ -13,7 +13,7 @@ A **100% frontend** real-time voice activity detection (VAD) system with wake wo
 - **🧠 Advanced Speech Detection**: Multi-criteria analysis (energy, frequency, spectral flatness)
 - **🔇 Built-in Noise Suppression**: Browser-native echo cancellation and noise reduction
 - **✂️ Automatic Speech Segmentation**: Detects speech start/end automatically
-- **⚡ Groq Whisper Integration**: Fast and accurate transcription with Whisper-large-v3-turbo
+- **⚡ Groq Whisper Integration**: Fast and accurate transcription with whisper-large-v3-turbo or whisper-large-v3
 - **⚙️ Adjustable Settings**: Fine-tune wake word, speech duration, and silence detection
 - **📊 Live Audio Visualization**: Real-time audio level monitoring
 - **🚀 High Performance**: AudioWorklet runs on separate thread for better performance

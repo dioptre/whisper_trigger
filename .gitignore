@@ -3,3 +3,18 @@ dist/
 .env
 .env.local
 *.log
+
+# Rust
+rust-audio/target/
+rust-audio/pkg/
+rust-audio/Cargo.lock
+**/*.rs.bk
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

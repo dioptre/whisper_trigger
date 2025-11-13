@@ -41,8 +41,28 @@ class AudioVADProcessor extends AudioWorkletProcessor {
       this.last_command_was_speech;
     this.sample_rate = options.processorOptions.sampleRate;
     this.fft_size = options.processorOptions.fftSize ?? this.fft_size;
+
+    // Allow tunable thresholds
+    this.primThresh_e = options.processorOptions.energyThreshold ?? this.primThresh_e;
+    this.primThresh_f_hz = options.processorOptions.frequencyThreshold ?? this.primThresh_f_hz;
+    this.primThresh_sfm = options.processorOptions.sfmThreshold ?? this.primThresh_sfm;
+
     this.fft = new FFT(this.fft_size);
     this.frame_size = (this.sample_rate * this.frame_size_ms) / 1000;
+
+    // Listen for parameter updates from main thread
+    this.port.onmessage = (event) => {
+      if (event.data.type === 'updateThresholds') {
+        this.primThresh_e = event.data.energyThreshold ?? this.primThresh_e;
+        this.primThresh_f_hz = event.data.frequencyThreshold ?? this.primThresh_f_hz;
+        this.primThresh_sfm = event.data.sfmThreshold ?? this.primThresh_sfm;
+        console.log('VAD thresholds updated:', {
+          energy: this.primThresh_e,
+          frequency: this.primThresh_f_hz,
+          sfm: this.primThresh_sfm
+        });
+      }
+    };
   }
 
   post(cmd, data) {
@@ -75,6 +95,18 @@ class AudioVADProcessor extends AudioWorkletProcessor {
     return res.slice(0, res.length / 2 - 1);
   }
 
+  calculateZeroCrossingRate(data) {
+    // Count zero crossings (sign changes)
+    let crossings = 0;
+    for (let i = 1; i < data.length; i++) {
+      if ((data[i] >= 0 && data[i - 1] < 0) || (data[i] < 0 && data[i - 1] >= 0)) {
+        crossings++;
+      }
+    }
+    // Normalize by frame length
+    return crossings / data.length;
+  }
+
   process(inputs, outputs, parameters) {
     if (!inputs || !inputs[0] || !inputs[0][0]) {
       return false;
@@ -104,6 +136,9 @@ class AudioVADProcessor extends AudioWorkletProcessor {
     for (let i = 0; i < timeData.length; i++) {
       energy += timeData[i] * timeData[i];
     }
+
+    // calculate zero-crossing rate
+    const zcr = this.calculateZeroCrossingRate(timeData);
 
     // get frequency with highest amplitude...
     let f_max = 0;
@@ -170,8 +205,14 @@ class AudioVADProcessor extends AudioWorkletProcessor {
       count++;
     }
 
-    if (count > 1) {
-      // is speech
+    // check zero-crossing rate (speech typically has ZCR between 0.1-0.3)
+    // Lower ZCR = voiced sounds (vowels), Higher ZCR = unvoiced sounds (consonants)
+    if (zcr > 0.05 && zcr < 0.5) {
+      count++;
+    }
+
+    if (count > 2) {
+      // is speech (raised threshold since we added ZCR)
       this.is_speech_frame_counter++;
       this.is_silent_frame_counter = 0;
     } else {

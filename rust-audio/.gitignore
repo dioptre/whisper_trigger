@@ -1,0 +1,20 @@
+# Rust build artifacts
+/target/
+/pkg/
+**/*.rs.bk
+
+# Cargo lock file (for libraries, we don't commit this)
+Cargo.lock
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# wasm-pack
+wasm-pack.log

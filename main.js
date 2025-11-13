@@ -4,6 +4,7 @@
 
 class VoiceActivityDetector {
     constructor(options = {}) {
+        this.options = options;
         this.minSpeechDuration = options.minSpeechDuration || 300; // ms
         this.silenceDuration = options.silenceDuration || 1000; // ms
         this.sampleRate = 16000; // Whisper expects 16kHz
@@ -45,15 +46,19 @@ class VoiceActivityDetector {
                 sampleRate: this.sampleRate
             });
 
-            // Load VAD AudioWorklet
+            // Load AudioWorklet modules
             await this.audioContext.audioWorklet.addModule("/vad-audio-worklet.js");
+            await this.audioContext.audioWorklet.addModule("/audio-capture-worklet.js");
 
-            // Create VAD node
+            // Create VAD node with initial thresholds
             this.vadNode = new AudioWorkletNode(this.audioContext, "vad", {
                 outputChannelCount: [1],
                 processorOptions: {
                     sampleRate: this.audioContext.sampleRate,
                     fftSize: 128,
+                    energyThreshold: parseFloat(this.options?.energyThreshold || 40),
+                    frequencyThreshold: parseFloat(this.options?.frequencyThreshold || 185),
+                    sfmThreshold: parseFloat(this.options?.sfmThreshold || 5),
                     debug: false // Set to true for debugging
                 }
             });
@@ -61,6 +66,18 @@ class VoiceActivityDetector {
             // Listen for VAD events
             this.vadNode.port.onmessage = (event) => {
                 this.handleVADEvent(event.data);
+            };
+
+            // Create audio capture worklet (replaces ScriptProcessor)
+            this.captureNode = new AudioWorkletNode(this.audioContext, "audio-capture", {
+                outputChannelCount: [1]
+            });
+
+            // Listen for captured audio data
+            this.captureNode.port.onmessage = (event) => {
+                if (event.data.type === 'audiodata') {
+                    this.processAudioChunk(event.data.data);
+                }
             };
 
             // Create analyser for visualization
@@ -71,21 +88,14 @@ class VoiceActivityDetector {
             // Create source from microphone
             this.source = this.audioContext.createMediaStreamSource(this.mediaStream);
 
-            // Create processor for capturing raw audio
-            this.processor = this.audioContext.createScriptProcessor(4096, 1, 1);
-            this.processor.onaudioprocess = (e) => {
-                const inputData = e.inputBuffer.getChannelData(0);
-                this.processAudioChunk(inputData);
-            };
-
             // Connect audio graph
             // Source -> VAD (for detection)
+            // Source -> CaptureNode (for raw audio)
             // Source -> Analyser (for visualization)
-            // Source -> Processor (for audio capture)
+            // NOTE: Do NOT connect to destination to avoid feedback loop!
             this.source.connect(this.vadNode);
+            this.source.connect(this.captureNode);
             this.source.connect(this.analyser);
-            this.source.connect(this.processor);
-            this.processor.connect(this.audioContext.destination);
 
             // Start visualization loop
             this.startVisualization();
@@ -240,8 +250,8 @@ class VoiceActivityDetector {
         if (this.silenceTimer) {
             clearTimeout(this.silenceTimer);
         }
-        if (this.processor) {
-            this.processor.disconnect();
+        if (this.captureNode) {
+            this.captureNode.disconnect();
         }
         if (this.analyser) {
             this.analyser.disconnect();
@@ -338,8 +348,12 @@ class WhisperTriggerApp {
             transcriptionText: document.getElementById('transcriptionText'),
             commandText: document.getElementById('commandText'),
             loading: document.getElementById('loading'),
-            threshold: document.getElementById('threshold'),
-            thresholdValue: document.getElementById('thresholdValue'),
+            energyThreshold: document.getElementById('energyThreshold'),
+            energyThresholdValue: document.getElementById('energyThresholdValue'),
+            frequencyThreshold: document.getElementById('frequencyThreshold'),
+            frequencyThresholdValue: document.getElementById('frequencyThresholdValue'),
+            sfmThreshold: document.getElementById('sfmThreshold'),
+            sfmThresholdValue: document.getElementById('sfmThresholdValue'),
             minDuration: document.getElementById('minDuration'),
             minDurationValue: document.getElementById('minDurationValue'),
             silenceDuration: document.getElementById('silenceDuration'),
@@ -347,7 +361,9 @@ class WhisperTriggerApp {
             wakeWordToggle: document.getElementById('wakeWordToggle'),
             wakeWord: document.getElementById('wakeWord'),
             wakeWordInput: document.getElementById('wakeWordInput'),
-            apiKey: document.getElementById('apiKey')
+            apiKey: document.getElementById('apiKey'),
+            model: document.getElementById('model'),
+            language: document.getElementById('language')
         };
 
         // Event listeners
@@ -375,11 +391,20 @@ class WhisperTriggerApp {
             console.log('Wake word updated to:', this.wakeWord);
         });
 
-        // Settings - Note: threshold is not used with AudioWorklet VAD
-        // The AudioWorklet has built-in thresholds (40dB energy, 185Hz frequency, 5dB spectral flatness)
-        this.elements.threshold.addEventListener('input', (e) => {
-            this.elements.thresholdValue.textContent = e.target.value;
-            // Threshold is controlled by AudioWorklet internally
+        // VAD Threshold controls
+        this.elements.energyThreshold.addEventListener('input', (e) => {
+            this.elements.energyThresholdValue.textContent = e.target.value;
+            this.updateVADThresholds();
+        });
+
+        this.elements.frequencyThreshold.addEventListener('input', (e) => {
+            this.elements.frequencyThresholdValue.textContent = e.target.value;
+            this.updateVADThresholds();
+        });
+
+        this.elements.sfmThreshold.addEventListener('input', (e) => {
+            this.elements.sfmThresholdValue.textContent = e.target.value;
+            this.updateVADThresholds();
         });
 
         this.elements.minDuration.addEventListener('input', (e) => {
@@ -395,14 +420,6 @@ class WhisperTriggerApp {
                 this.vad.updateSettings({ silenceDuration: parseInt(e.target.value) });
             }
         });
-
-        // Update threshold label to reflect that it's not used
-        const thresholdLabel = this.elements.threshold.parentElement.querySelector('label');
-        if (thresholdLabel) {
-            thresholdLabel.innerHTML = 'VAD Threshold: <span class="value-display" style="color: #999;">Auto (FFT-based)</span>';
-            this.elements.threshold.style.opacity = '0.5';
-            this.elements.threshold.disabled = true;
-        }
     }
 
     async start() {
@@ -410,10 +427,13 @@ class WhisperTriggerApp {
             this.elements.startBtn.disabled = true;
             this.updateStatus('Initializing...', 'listening');
 
-            // Create VAD instance
+            // Create VAD instance with threshold settings
             this.vad = new VoiceActivityDetector({
                 minSpeechDuration: parseInt(this.elements.minDuration.value),
-                silenceDuration: parseInt(this.elements.silenceDuration.value)
+                silenceDuration: parseInt(this.elements.silenceDuration.value),
+                energyThreshold: parseFloat(this.elements.energyThreshold.value),
+                frequencyThreshold: parseFloat(this.elements.frequencyThreshold.value),
+                sfmThreshold: parseFloat(this.elements.sfmThreshold.value)
             });
 
             // Set up callbacks
@@ -486,13 +506,19 @@ class WhisperTriggerApp {
             const wavBlob = float32ToWav(audioData, 16000);
             console.log('WAV blob size:', wavBlob.size, 'bytes');
 
+            // Get settings from UI
+            const selectedModel = this.elements.model.value;
+            const selectedLanguage = this.elements.language.value;
+
             // Create form data for Groq API
             const formData = new FormData();
             formData.append('file', wavBlob, 'speech.wav');
-            formData.append('model', 'whisper-large-v3-turbo');
+            formData.append('model', selectedModel);
             formData.append('temperature', '0');
             formData.append('response_format', 'json');
-            formData.append('language', 'en');
+            formData.append('language', selectedLanguage);
+
+            console.log(`Using model: ${selectedModel}, language: ${selectedLanguage}`);
 
             // Get API key from settings
             const apiKey = this.elements.apiKey.value.trim();
@@ -629,6 +655,23 @@ class WhisperTriggerApp {
         this.elements.commandText.value = currentText + newLine;
         this.elements.commandText.scrollTop = this.elements.commandText.scrollHeight;
         this.elements.transcription.classList.add('show');
+    }
+
+    updateVADThresholds() {
+        if (!this.vad || !this.vad.vadNode) {
+            console.log('VAD not initialized yet');
+            return;
+        }
+
+        const thresholds = {
+            type: 'updateThresholds',
+            energyThreshold: parseFloat(this.elements.energyThreshold.value),
+            frequencyThreshold: parseFloat(this.elements.frequencyThreshold.value),
+            sfmThreshold: parseFloat(this.elements.sfmThreshold.value)
+        };
+
+        console.log('Sending threshold update to VAD:', thresholds);
+        this.vad.vadNode.port.postMessage(thresholds);
     }
 
     updateStatus(text, state) {
