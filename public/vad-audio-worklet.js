@@ -19,10 +19,12 @@ class AudioVADProcessor extends AudioWorkletProcessor {
   f_min = null;
   sfm_min = null;
 
-  // Accumulators for averaging
-  e_sum = 0;
-  f_sum = 0;
-  sfm_sum = 0;
+  // Adaptive baseline sampling
+  baseline_samples = [];
+  max_baseline_samples = 50; // Keep last 50 samples
+  sample_counter = 0;
+  next_sample_frame = 5; // Start sampling after a few frames
+  continuous_speech_frames = 0;
 
   baselines_ready = false;
 
@@ -198,32 +200,7 @@ class AudioVADProcessor extends AudioWorkletProcessor {
     // just safety check
     sfm = isFinite(sfm) ? sfm : 0;
 
-    // Collect baselines by AVERAGING first 30 frames (not minimum!)
-    if (!this.baselines_ready) {
-      if (this.frame_counter <= 30) {
-        // Accumulate values
-        this.e_sum += energy;
-        this.f_sum += f_max_hz;
-        this.sfm_sum += sfm;
-
-        if (this.frame_counter === 30) {
-          // Calculate averages
-          this.e_min = this.e_sum / 30;
-          this.f_min = this.f_sum / 30;
-          this.sfm_min = this.sfm_sum / 30;
-
-          this.baselines_ready = true;
-          console.log('✅ VAD baselines (AVERAGED from 30 frames):', {
-            e_min: this.e_min,
-            f_min: this.f_min,
-            sfm_min: this.sfm_min
-          });
-        }
-        return true; // Don't make decisions yet
-      }
-    }
-
-    // frame vad counter
+    // frame vad counter - MUST BE CALCULATED FIRST!
     let count = 0;
 
     // check energy threshold (skip if baseline is 0)
@@ -231,7 +208,7 @@ class AudioVADProcessor extends AudioWorkletProcessor {
     if (this.e_min > 0 && energy > 0) {
       const energyRatio = energy / this.e_min;
       // Speech is typically 10-100x louder than ambient noise
-      if (energyRatio > 5.0) { // Require 5x increase above baseline
+      if (energyRatio > 10.0) { // Require 10x increase above baseline
         count++;
       }
     }
@@ -246,7 +223,90 @@ class AudioVADProcessor extends AudioWorkletProcessor {
       count++;
     }
 
-    // Require at least 2 criteria to match
+    // check zero-crossing rate
+    if (zcr > 0.05 && zcr < 0.5) {
+      count++;
+    }
+
+    // Track continuous speech duration FIRST
+    if (count > 1) {
+      this.continuous_speech_frames++;
+    } else {
+      this.continuous_speech_frames = 0;
+    }
+
+    // Adaptive baseline sampling - DISABLED during mirror playback
+    const isConfirmedSilence = this.is_silent_frame_counter > 5; // At least 5 frames of silence
+    const isLongSpeech = this.continuous_speech_frames > 3000; // >30 seconds of speech
+    const isBootstrapping = this.baseline_samples.length < 5; // Still collecting initial samples
+
+    const shouldSample = (
+      // During bootstrapping, sample when count is low (count <= 1, more lenient)
+      (isBootstrapping && count <= 1 && this.frame_counter >= this.next_sample_frame) ||
+      // After bootstrapping, only sample during confirmed silence
+      (!isBootstrapping && isConfirmedSilence && this.frame_counter >= this.next_sample_frame) ||
+      // Or during long speech (background takeover)
+      isLongSpeech
+    );
+
+    // Note: When mirror is speaking, the worklet is disconnected so this won't run anyway
+
+    // Log first few frames to debug
+    if (this.frame_counter <= 5) {
+      console.log(`Frame ${this.frame_counter}: count=${count}, shouldSample=${shouldSample}, next_sample=${this.next_sample_frame}, bootstrapping=${isBootstrapping}`);
+    }
+
+    if (shouldSample) {
+      this.baseline_samples.push({ e: energy, f: f_max_hz, sfm: sfm });
+
+      if (this.baseline_samples.length > this.max_baseline_samples) {
+        this.baseline_samples.shift();
+      }
+
+      // First 5 samples: Rapid succession (every 10-20 frames = 100-200ms)
+      if (this.baseline_samples.length < 5) {
+        this.next_sample_frame = this.frame_counter + 10 + Math.floor(Math.random() * 10);
+      } else {
+        // After 5 samples: Random intervals with exponential falloff
+        const base_interval = 100 + Math.random() * 400;
+        const falloff = Math.exp(-this.sample_counter / 100);
+        this.next_sample_frame = this.frame_counter + Math.floor(base_interval * (0.5 + falloff * 0.5));
+      }
+      this.sample_counter++;
+
+      console.log(`📊 Sample #${this.baseline_samples.length}, next in ${this.next_sample_frame - this.frame_counter}f`);
+
+      if (this.baseline_samples.length >= 5) {
+        let e_sum = 0, f_sum = 0, sfm_sum = 0;
+        for (let i = 0; i < this.baseline_samples.length; i++) {
+          const weight = (i + 1) / this.baseline_samples.length;
+          e_sum += this.baseline_samples[i].e * weight;
+          f_sum += this.baseline_samples[i].f * weight;
+          sfm_sum += this.baseline_samples[i].sfm * weight;
+        }
+        const total_weight = this.baseline_samples.length * (this.baseline_samples.length + 1) / 2;
+        this.e_min = e_sum / total_weight;
+        this.f_min = f_sum / total_weight;
+        this.sfm_min = sfm_sum / total_weight;
+
+        if (!this.baselines_ready) {
+          this.baselines_ready = true;
+          console.log('✅ Baselines:', { e_min: this.e_min, f_min: this.f_min, sfm_min: this.sfm_min, samples: this.baseline_samples.length });
+        }
+      }
+
+      // If long speech triggered sampling, reset the counter
+      if (isLongSpeech) {
+        console.log('⚠️ Long speech detected (>30s), resampling baseline');
+        this.continuous_speech_frames = 0;
+      }
+    }
+
+    if (!this.baselines_ready) {
+      return true;
+    }
+
+    // Speech/silence detection
     if (count > 1) {
       this.is_speech_frame_counter++;
       this.is_silent_frame_counter = 0;

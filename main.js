@@ -82,7 +82,7 @@ class VoiceActivityDetector {
                     // Debug logging from VAD - only show if count > 0
                     const data = event.data.data;
                     if (data.count > 0) {
-                        console.log(`🎯 VAD [Frame ${data.frame}] count=${data.count}, speech=${data.speech_frames}, silence=${data.silence_frames}`, data);
+                        //console.log(`🎯 VAD [Frame ${data.frame}] count=${data.count}, speech=${data.speech_frames}, silence=${data.silence_frames}`, data);
                     }
                 } else {
                     this.handleVADEvent(event.data);
@@ -343,16 +343,27 @@ class WhisperTriggerApp {
         this.isAwake = false; // Whether wake word has been detected
         this.wakeWordMode = true; // Whether to use wake word detection
 
+        // Mirror playback state
+        this.isMirrorSpeaking = false;
+
         this.initializeUI();
 
         // Set wake word from UI after elements are initialized
         this.wakeWord = this.elements.wakeWord.value;
         console.log('Initial wake word set to:', this.wakeWord);
 
-        // Load API key from environment variable if available
+        // Load API keys from environment variables if available
         if (import.meta.env.VITE_GROQ_API_KEY && !this.elements.apiKey.value) {
             this.elements.apiKey.value = import.meta.env.VITE_GROQ_API_KEY;
-            console.log('✅ Loaded API key from .env');
+            console.log('✅ Loaded Groq API key from .env');
+        }
+        if (import.meta.env.VITE_ELEVENLABS_API_KEY && !this.elements.elevenLabsApiKey.value) {
+            this.elements.elevenLabsApiKey.value = import.meta.env.VITE_ELEVENLABS_API_KEY;
+            console.log('✅ Loaded ElevenLabs API key from .env');
+        }
+        if (import.meta.env.VITE_REPLICATE_API_KEY && !this.elements.replicateApiKey.value) {
+            this.elements.replicateApiKey.value = import.meta.env.VITE_REPLICATE_API_KEY;
+            console.log('✅ Loaded Replicate API key from .env');
         }
     }
 
@@ -369,6 +380,7 @@ class WhisperTriggerApp {
             transcriptionText: document.getElementById('transcriptionText'),
             commandText: document.getElementById('commandText'),
             creativePrompt: document.getElementById('creativePrompt'),
+            mirrorRebuke: document.getElementById('mirrorRebuke'),
             loading: document.getElementById('loading'),
             energyThreshold: document.getElementById('energyThreshold'),
             energyThresholdValue: document.getElementById('energyThresholdValue'),
@@ -394,8 +406,18 @@ class WhisperTriggerApp {
             wakeWord: document.getElementById('wakeWord'),
             wakeWordInput: document.getElementById('wakeWordInput'),
             apiKey: document.getElementById('apiKey'),
+            elevenLabsApiKey: document.getElementById('elevenLabsApiKey'),
+            replicateApiKey: document.getElementById('replicateApiKey'),
+            ttsProvider: document.querySelectorAll('input[name="ttsProvider"]'),
             model: document.getElementById('model'),
             language: document.getElementById('language')
+        };
+
+        // Audio element for mirror responses
+        this.mirrorAudio = new Audio();
+        this.mirrorAudio.onended = () => {
+            console.log('🔊 Mirror finished speaking, resuming VAD');
+            // Resume VAD after playback
         };
 
         // Event listeners
@@ -622,9 +644,8 @@ class WhisperTriggerApp {
 
                 // Check if it contains the wake word and extract command
                 const wakeWordLower = this.wakeWord.toLowerCase();
-                console.log('🔍 Checking for wake word...');
-                console.log('  Wake word:', `"${wakeWordLower}"`);
-                console.log('  Transcription:', `"${transcriptionLower}"`);
+                let commandText = '';
+                let isGarbled = false;
 
                 // Try exact match first
                 let wakeWordIndex = transcriptionLower.indexOf(wakeWordLower);
@@ -639,31 +660,29 @@ class WhisperTriggerApp {
                         if (wakeWordIndex >= 0) {
                             wakeWordIndex += prefix.length; // Skip the prefix
                             foundWakeWord = true;
-                            console.log(`  Found with prefix "${prefix}"`);
+                            console.log(`✅ Wake word found with prefix "${prefix}"`);
                             break;
                         }
                     }
                 }
 
-                console.log('  Contains wake word?', foundWakeWord);
-
                 if (foundWakeWord) {
-                    const commandText = transcription.substring(wakeWordIndex + this.wakeWord.length).trim();
-
-                    console.log('  Wake word index:', wakeWordIndex);
-                    console.log('  Wake word length:', this.wakeWord.length);
-                    console.log('  Substring start:', wakeWordIndex + this.wakeWord.length);
-                    console.log('  Command text (before trim):', `"${transcription.substring(wakeWordIndex + this.wakeWord.length)}"`);
-                    console.log('  Command text (after trim):', `"${commandText}"`);
-
-                    if (commandText) {
-                        console.log('✅ Wake word found! Command:', commandText);
-                        this.displayCommand(commandText);
-                    } else {
-                        console.log('✅ Wake word found but no command after it');
-                    }
+                    commandText = transcription.substring(wakeWordIndex + this.wakeWord.length).trim();
+                    console.log('✅ Wake word found! Command:', commandText);
+                    this.displayCommand(commandText);
+                    isGarbled = false;
                 } else {
-                    console.log('❌ Wake word not found in transcription');
+                    // No wake word - use full transcription as GARBLED fallback
+                    console.log('❌ Wake word not found - treating as garbled, going EXTRA WILD');
+                    commandText = transcription;
+                    isGarbled = true;
+                    this.displayCommand(`[GARBLED/NO WAKE WORD] ${commandText}`);
+                }
+
+                // Generate creative prompt AND voice response for ANY non-empty command
+                if (commandText) {
+                    this.generateCreativePrompt(commandText, Date.now(), isGarbled);
+                    this.generateMirrorResponse(commandText, isGarbled);
                 }
             } else {
                 console.log('Empty transcription received');
@@ -713,12 +732,9 @@ class WhisperTriggerApp {
         this.elements.commandText.value = currentText + newLine;
         this.elements.commandText.scrollTop = this.elements.commandText.scrollHeight;
         this.elements.transcription.classList.add('show');
-
-        // Generate creative art prompt from command
-        this.generateCreativePrompt(text, timestamp);
     }
 
-    async generateCreativePrompt(command, timestamp) {
+    async generateCreativePrompt(command, timestamp, isGarbled = false) {
         try {
             const apiKey = this.elements.apiKey.value.trim();
             if (!apiKey) {
@@ -727,29 +743,36 @@ class WhisperTriggerApp {
             }
 
             // Show generating message
+            const ts = new Date(timestamp).toLocaleTimeString();
             const currentText = this.elements.creativePrompt.value;
-            this.elements.creativePrompt.value = currentText + `[${timestamp}] ✨ Generating...\n`;
+            this.elements.creativePrompt.value = currentText + `[${ts}] ✨ Generating...\n`;
 
-            // Create the system prompt - ask LLM to be WILD and creative
-            const systemPrompt = `You are the Magic Mirror's mischievous creative director - a flamboyant, theatrical spirit who transforms mundane commands into SPECTACULAR, WILD, and DELIGHTFULLY ABSURD art generation prompts.
+            // Create system prompt - EXTRA wild if garbled
+            const wildnessLevel = isGarbled ? "ABSOLUTELY UNHINGED AND MAXIMALLY AUDACIOUS" : "WILD and SPECTACULAR";
+            const garbledInstructions = isGarbled ?
+                `\n\nNOTE: This text appears garbled or confused - EMBRACE THE CHAOS! Interpret it in the most GLORIOUSLY ABSURD way possible. Turn the confusion into PURE ARTISTIC MADNESS. Be even MORE theatrical, MORE surreal, MORE delightfully unhinged than usual!` : '';
 
-Your mission: Take boring requests and explode them into vivid, cheeky, detailed scenarios that would make Salvador Dali jealous.
+            const systemPrompt = `You are the Magic Mirror's mischievous creative director - a flamboyant, theatrical spirit who transforms mundane commands into ${wildnessLevel} art generation prompts.
 
-RULES:
-- Be EXTREMELY detailed and descriptive
-- Add unexpected magical twists and surreal elements
-- Give characters personality and cheekiness
-- Include dramatic lighting, wild colors, bizarre perspectives
-- Make it theatrical, playful, slightly unhinged
-- Paint a complete sensory picture
+Your mission: Take requests and EXPLODE them into vivid, cheeky, detailed scenarios that would make Salvador Dali weep with jealous admiration.
+
+RULES FOR MAGNIFICENCE:
+- Be EXTREMELY detailed and descriptive (minimum 150 words!)
+- Add UNEXPECTED magical twists and surreal elements
+- Give characters sass, personality, and delightful cheekiness
+- Include DRAMATIC lighting (god rays, neon glows, ethereal mists)
+- Use WILD colors (iridescent purples, electric pinks, cosmic blues)
+- Add bizarre perspectives and impossible geometries
+- Make it theatrical, playful, and slightly unhinged
+- Paint a COMPLETE sensory picture (sounds, textures, atmosphere)
 - Channel chaos, whimsy, and pure creative madness
-- Go ABSOLUTELY WILD - the more extra, the better!
+- Be audacious, be extra, be MAGNIFICENT!${garbledInstructions}
 
-Return ONLY the final art prompt - no explanations, no meta-commentary, just pure unbridled creative description!`;
+Return ONLY the final art prompt - no explanations, no meta-commentary, just pure unbridled creative description that makes reality jealous!`;
 
-            const userPrompt = `Transform this mirror command into a magnificently wild art prompt: "${command}"`;
+            const userPrompt = `Transform this into a magnificently wild art prompt: "${command}"`;
 
-            console.log('🎨 Generating creative prompt for:', command);
+            console.log(`🎨 Generating ${isGarbled ? '🔥 EXTRA WILD 🔥' : 'creative'} prompt for:`, command);
 
             const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
                 method: 'POST',
@@ -787,6 +810,205 @@ Return ONLY the final art prompt - no explanations, no meta-commentary, just pur
         } catch (error) {
             console.error('Creative prompt generation error:', error);
             this.elements.creativePrompt.value += `[${timestamp}] ❌ Error generating creative prompt: ${error.message}\n\n`;
+        }
+    }
+
+    async generateMirrorResponse(command, isGarbled) {
+        try {
+            const apiKey = this.elements.apiKey.value.trim();
+            const ttsProvider = Array.from(this.elements.ttsProvider).find(r => r.checked)?.value || 'elevenlabs';
+            const elevenLabsKey = this.elements.elevenLabsApiKey.value.trim();
+            const replicateKey = this.elements.replicateApiKey.value.trim();
+
+            if (!apiKey) {
+                console.log('No Groq API key for mirror response');
+                return;
+            }
+
+            if (ttsProvider === 'elevenlabs' && !elevenLabsKey) {
+                console.log('No ElevenLabs API key, skipping voice');
+                return;
+            }
+
+            if (ttsProvider === 'replicate' && !replicateKey) {
+                console.log('No Replicate API key, skipping voice');
+                return;
+            }
+
+            console.log('🪞 Generating sour mirror rebuke...');
+
+            // Generate witty, sour, mournful rebuke using Groq
+            const garbledExtra = isGarbled ?
+                '\n\n🔥 EXTRA AUDACIOUS MODE: The speech was garbled/unclear! Be EVEN MORE sarcastic, MORE mocking, MORE delightfully mean about their mumbling! Really wind them up!' :
+                '';
+
+            const rebukePrompt = `You are a DULL, BORING, SOUR, MOURNFUL magic mirror with a cutting wit. Someone just said: "${command}"
+
+Generate a WITTY, CHEEKY spoken rebuke that winds them up. Be:
+- Dull and monotone in tone but DEVASTATINGLY clever in content
+- Sour and mournful (let the voice actor handle the sighs)
+- Dripping with sarcasm and passive-aggression
+- Subtly insulting in a playful, theatrical way
+- Brief but CUTTING (1-2 sentences max)
+${garbledExtra}
+
+CRITICAL: Return ONLY spoken dialogue - NO asterisks, NO stage directions, NO *sighs* or *actions*. The text-to-speech will read everything literally!
+
+Examples:
+- "Oh how delightful another vague request as if I haven't heard this one before how utterly thrilling for me"
+- "Marvellous another human mumbling at a mirror expecting miracles my existence is truly blessed"
+- "Yes yes another confused soul who thinks I'm their personal servant how wonderfully original"
+
+Return ONLY clean spoken text, nothing else.`;
+
+            const rebukeResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    model: 'llama-3.3-70b-versatile',
+                    messages: [{ role: 'user', content: rebukePrompt }],
+                    temperature: 1.2,
+                    max_tokens: 150
+                })
+            });
+
+            if (!rebukeResponse.ok) {
+                throw new Error(`Groq error: ${rebukeResponse.status}`);
+            }
+
+            const rebukeData = await rebukeResponse.json();
+            let rebukeText = rebukeData.choices[0]?.message?.content?.trim() || 'How utterly thrilling.';
+
+            // Remove any asterisks and stage directions that might have snuck through
+            rebukeText = rebukeText.replace(/\*[^*]+\*/g, ''); // Remove *anything in asterisks*
+            rebukeText = rebukeText.replace(/\s+/g, ' ').trim(); // Clean up extra spaces
+
+            console.log(`🪞 Mirror says:`, rebukeText);
+
+            // Display rebuke in textbox
+            const timestamp = new Date().toLocaleTimeString();
+            this.elements.mirrorRebuke.value += `[${timestamp}] ${rebukeText}\n\n`;
+            this.elements.mirrorRebuke.scrollTop = this.elements.mirrorRebuke.scrollHeight;
+
+            let audioBlob;
+
+            if (ttsProvider === 'elevenlabs') {
+                // ElevenLabs (Viraj voice)
+                const voiceId = 'jsCqWAovK2LkecY7zXl4';
+
+                const ttsResponse = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
+                    method: 'POST',
+                    headers: {
+                        'xi-api-key': elevenLabsKey,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        text: rebukeText,
+                        model_id: 'eleven_turbo_v2_5',
+                        voice_settings: {
+                            stability: 0.5,
+                            similarity_boost: 0.75,
+                            style: 0.3,
+                            use_speaker_boost: true
+                        }
+                    })
+                });
+
+                if (!ttsResponse.ok) {
+                    const errorText = await ttsResponse.text();
+                    throw new Error(`ElevenLabs error: ${ttsResponse.status} - ${errorText}`);
+                }
+
+                audioBlob = await ttsResponse.blob();
+
+            } else {
+                // Replicate via Vite proxy
+                const proxyResponse = await fetch('/proxy/replicate/v1/models/minimax/speech-02-turbo/predictions', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${replicateKey}`,
+                        'Content-Type': 'application/json',
+                        'Prefer': 'wait'
+                    },
+                    body: JSON.stringify({
+                        input: {
+                            text: rebukeText,
+                            pitch: 0,
+                            speed: 0.9,
+                            volume: 1,
+                            bitrate: 128000,
+                            channel: 'mono',
+                            emotion: 'sad',
+                            voice_id: 'Aussie_Bloke',
+                            sample_rate: 32000,
+                            audio_format: 'mp3',
+                            language_boost: 'English',
+                            subtitle_enable: false,
+                            english_normalization: true
+                        }
+                    })
+                });
+
+                if (!proxyResponse.ok) {
+                    const errorText = await proxyResponse.text();
+                    throw new Error(`Replicate error: ${proxyResponse.status} - ${errorText}`);
+                }
+
+                const replicateData = await proxyResponse.json();
+
+                // Fetch audio from output URL via proxy
+                const audioResponse = await fetch(replicateData.output);
+                audioBlob = await audioResponse.blob();
+            }
+
+            const audioUrl = URL.createObjectURL(audioBlob);
+
+            console.log('🔊 Playing mirror response...');
+
+            // Set flag to prevent VAD/sampling during playback
+            this.isMirrorSpeaking = true;
+
+            // Pause VAD during playback (don't detect our own voice!)
+            if (this.vad) {
+                console.log('⏸️ Pausing VAD during mirror speech');
+                // Disconnect VAD and capture nodes
+                if (this.vad.vadNode) {
+                    this.vad.vadNode.disconnect();
+                }
+                if (this.vad.captureNode) {
+                    this.vad.captureNode.disconnect();
+                }
+            }
+
+            // Play the audio
+            this.mirrorAudio.src = audioUrl;
+            await this.mirrorAudio.play();
+
+            // Wait for audio to finish, then reconnect VAD
+            this.mirrorAudio.onended = () => {
+                console.log('🔊 Mirror finished speaking');
+                URL.revokeObjectURL(audioUrl);
+
+                // Clear speaking flag
+                this.isMirrorSpeaking = false;
+
+                // Reconnect VAD and capture
+                if (this.vad && this.vad.source) {
+                    console.log('▶️ Resuming VAD');
+                    if (this.vad.vadNode) {
+                        this.vad.source.connect(this.vad.vadNode);
+                    }
+                    if (this.vad.captureNode) {
+                        this.vad.source.connect(this.vad.captureNode);
+                    }
+                }
+            };
+
+        } catch (error) {
+            console.error('Mirror response error:', error);
         }
     }
 

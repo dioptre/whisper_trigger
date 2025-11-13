@@ -289,7 +289,11 @@
 
             <div class="transcription-label">🎨 Creative Art Prompt (LLM-enhanced):</div>
             <textarea id="creativePrompt" readonly
-                style="width: 100%; min-height: 200px; padding: 10px; border: 1px solid #ff6b9d; border-radius: 5px; font-family: inherit; font-size: 0.9em; resize: vertical; background: #fff0f5; line-height: 1.6;"></textarea>
+                style="width: 100%; min-height: 200px; padding: 10px; border: 1px solid #ff6b9d; border-radius: 5px; font-family: inherit; font-size: 0.9em; resize: vertical; background: #fff0f5; line-height: 1.6; margin-bottom: 15px;"></textarea>
+
+            <div class="transcription-label">🪞 Mirror's Sour Rebuke:</div>
+            <textarea id="mirrorRebuke" readonly
+                style="width: 100%; min-height: 120px; padding: 10px; border: 1px solid #9333ea; border-radius: 5px; font-family: inherit; font-size: 0.9em; resize: vertical; background: #faf5ff; font-style: italic;"></textarea>
         </div>
 
         <div class="settings">
@@ -303,6 +307,40 @@
                        style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 5px; font-size: 0.9em; font-family: monospace;">
                 <div style="font-size: 0.75em; color: #999; margin-top: 5px;">
                     Get your API key from <a href="https://console.groq.com/" target="_blank" style="color: #667eea;">console.groq.com</a>
+                </div>
+            </div>
+            <div class="setting-item">
+                <label>
+                    Voice Provider:
+                </label>
+                <div style="display: flex; gap: 15px; margin-top: 5px;">
+                    <label style="display: flex; align-items: center; gap: 5px;">
+                        <input type="radio" name="ttsProvider" value="elevenlabs">
+                        ElevenLabs
+                    </label>
+                    <label style="display: flex; align-items: center; gap: 5px;">
+                        <input type="radio" name="ttsProvider" value="replicate" checked>
+                        Replicate
+                    </label>
+                </div>
+            </div>
+            <div class="setting-item">
+                <label>
+                    ElevenLabs API Key:
+                </label>
+                <input type="password" id="elevenLabsApiKey" value=""
+                       placeholder="Get from elevenlabs.io"
+                       style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 5px; font-size: 0.9em; font-family: monospace;">
+            </div>
+            <div class="setting-item">
+                <label>
+                    Replicate API Key:
+                </label>
+                <input type="password" id="replicateApiKey" value=""
+                       placeholder="Get from replicate.com"
+                       style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 5px; font-size: 0.9em; font-family: monospace;">
+                <div style="font-size: 0.75em; color: #999; margin-top: 5px;">
+                    Voice responses via Vite proxy (works in dev mode)
                 </div>
             </div>
             <div class="setting-item">
