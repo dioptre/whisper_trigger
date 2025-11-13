@@ -368,6 +368,7 @@ class WhisperTriggerApp {
             transcription: document.getElementById('transcription'),
             transcriptionText: document.getElementById('transcriptionText'),
             commandText: document.getElementById('commandText'),
+            creativePrompt: document.getElementById('creativePrompt'),
             loading: document.getElementById('loading'),
             energyThreshold: document.getElementById('energyThreshold'),
             energyThresholdValue: document.getElementById('energyThresholdValue'),
@@ -712,6 +713,81 @@ class WhisperTriggerApp {
         this.elements.commandText.value = currentText + newLine;
         this.elements.commandText.scrollTop = this.elements.commandText.scrollHeight;
         this.elements.transcription.classList.add('show');
+
+        // Generate creative art prompt from command
+        this.generateCreativePrompt(text, timestamp);
+    }
+
+    async generateCreativePrompt(command, timestamp) {
+        try {
+            const apiKey = this.elements.apiKey.value.trim();
+            if (!apiKey) {
+                console.log('No API key for creative prompt generation');
+                return;
+            }
+
+            // Show generating message
+            const currentText = this.elements.creativePrompt.value;
+            this.elements.creativePrompt.value = currentText + `[${timestamp}] ✨ Generating...\n`;
+
+            // Create the system prompt - ask LLM to be WILD and creative
+            const systemPrompt = `You are the Magic Mirror's mischievous creative director - a flamboyant, theatrical spirit who transforms mundane commands into SPECTACULAR, WILD, and DELIGHTFULLY ABSURD art generation prompts.
+
+Your mission: Take boring requests and explode them into vivid, cheeky, detailed scenarios that would make Salvador Dali jealous.
+
+RULES:
+- Be EXTREMELY detailed and descriptive
+- Add unexpected magical twists and surreal elements
+- Give characters personality and cheekiness
+- Include dramatic lighting, wild colors, bizarre perspectives
+- Make it theatrical, playful, slightly unhinged
+- Paint a complete sensory picture
+- Channel chaos, whimsy, and pure creative madness
+- Go ABSOLUTELY WILD - the more extra, the better!
+
+Return ONLY the final art prompt - no explanations, no meta-commentary, just pure unbridled creative description!`;
+
+            const userPrompt = `Transform this mirror command into a magnificently wild art prompt: "${command}"`;
+
+            console.log('🎨 Generating creative prompt for:', command);
+
+            const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    model: 'llama-3.3-70b-versatile',
+                    messages: [
+                        { role: 'system', content: systemPrompt },
+                        { role: 'user', content: userPrompt }
+                    ],
+                    temperature: 1.3,
+                    max_tokens: 1024,
+                    top_p: 1,
+                    stream: false
+                })
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`Groq API error ${response.status}: ${errorText}`);
+            }
+
+            const data = await response.json();
+            const promptText = data.choices[0]?.message?.content || 'No prompt generated';
+
+            // Replace "generating" message with final prompt
+            this.elements.creativePrompt.value = currentText + `[${timestamp}] ${promptText}\n\n`;
+            this.elements.creativePrompt.scrollTop = this.elements.creativePrompt.scrollHeight;
+
+            console.log('✨ Creative prompt generated:', promptText.substring(0, 100) + '...');
+
+        } catch (error) {
+            console.error('Creative prompt generation error:', error);
+            this.elements.creativePrompt.value += `[${timestamp}] ❌ Error generating creative prompt: ${error.message}\n\n`;
+        }
     }
 
     updateVADThresholds() {
