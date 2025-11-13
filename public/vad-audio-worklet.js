@@ -84,6 +84,13 @@ class AudioVADProcessor extends AudioWorkletProcessor {
       } else if (event.data.type === 'setDebug') {
         this.debug = event.data.debug ?? this.debug;
         console.log('Debug mode:', this.debug ? 'ENABLED' : 'DISABLED');
+      } else if (event.data.type === 'reset') {
+        // Reset all counters
+        this.is_speech_frame_counter = 0;
+        this.is_silent_frame_counter = 0;
+        this.last_command_was_speech = false;
+        this.continuous_speech_frames = 0;
+        console.log('VAD state reset');
       }
     };
   }
@@ -131,9 +138,16 @@ class AudioVADProcessor extends AudioWorkletProcessor {
   }
 
   process(inputs, outputs, parameters) {
-    if (!inputs || !inputs[0] || !inputs[0][0]) {
-      return false;
+    // Log first few calls
+    if (this.frame_counter <= 2) {
+      console.log(`VAD process() frame ${this.frame_counter}, has input:`, !!inputs?.[0]?.[0]);
     }
+
+    if (!inputs || !inputs[0] || !inputs[0][0]) {
+      console.error('❌ VAD: No input data!');
+      return true;
+    }
+
     // buffer input data
     if (this.buffer.length < this.frame_size) {
       this.buffer.push(...inputs[0][0]);

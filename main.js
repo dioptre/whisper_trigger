@@ -13,6 +13,20 @@ class VoiceActivityDetector {
         this.speechStartTime = null;
         this.lastSpeechTime = null;
         this.audioChunks = [];
+        this.audioChunksAtSilence = 0; // How many chunks were captured when silence was first detected
+
+        // Pre-roll buffer - keep last 200ms of audio
+        this.preRollBuffer = [];
+        this.preRollDuration = 0.2; // 200ms in seconds
+        this.preRollSamples = Math.floor(this.sampleRate * this.preRollDuration); // 3200 samples at 16kHz
+
+        // Flag to pause during external audio playback/processing
+        this.pausedForPlayback = false;
+        this.pauseTimestamp = 0; // Timestamp when pause was set (to filter in-flight events)
+        this.pauseTimeoutId = null; // Safety timeout to always clear pause flag
+
+        // Silence timer state
+        this.silenceTimerStarted = null; // When the silence timer was started
 
         this.audioContext = null;
         this.mediaStream = null;
@@ -23,6 +37,7 @@ class VoiceActivityDetector {
 
         this.onSpeechStart = null;
         this.onSpeechEnd = null;
+        this.onSpeechTooShort = null; // Callback when speech is rejected as too short
         this.onAudioLevel = null;
 
         // Silence timer
@@ -129,8 +144,18 @@ class VoiceActivityDetector {
     }
 
     handleVADEvent(event) {
-        const cmd = event.cmd;
         const now = Date.now();
+
+        // Ignore VAD events during mirror playback/processing
+        console.log(`VAD Event received: ${event.cmd}, pausedForPlayback=${this.pausedForPlayback}`);
+        if (this.pausedForPlayback) {
+            // Ignore events that arrived within 100ms of pause being set (in-flight events)
+            const timeSincePause = now - (this.pauseTimestamp || 0);
+            console.log(`🔇 IGNORING VAD event (paused ${timeSincePause}ms ago)`);
+            return;
+        }
+
+        const cmd = event.cmd;
 
         console.log(`📢 VAD EVENT: ${cmd} at ${new Date().toLocaleTimeString()}`);
 
@@ -138,19 +163,25 @@ class VoiceActivityDetector {
             // Speech detected by VAD
             console.log("✅ VAD: Speech detected");
 
-            // Clear any pending silence timer
+            // If silence timer is running, ALWAYS ignore new speech events
+            // Once we start waiting for silence confirmation, that utterance is DONE
+            // Any new speech should be a completely separate capture cycle
             if (this.silenceTimer) {
-                console.log("Clearing existing silence timer");
-                clearTimeout(this.silenceTimer);
-                this.silenceTimer = null;
+                const timeSinceTimer = now - this.silenceTimerStarted;
+                console.log(`⚠️ Ignoring speech event - silence timer in progress (${timeSinceTimer}ms elapsed)`);
+                return;
             }
 
             if (!this.isSpeaking) {
                 // Start of speech
-                console.log("🎤 Starting new speech capture");
+                console.log("🎤 Starting new speech capture (with pre-roll buffer)");
                 this.isSpeaking = true;
                 this.speechStartTime = now;
-                this.audioChunks = [];
+                this.audioChunksAtSilence = 0; // Reset snapshot
+
+                // Initialize with pre-roll buffer (200ms before VAD trigger)
+                this.audioChunks = [...this.preRollBuffer];
+                console.log(`  Added ${this.preRollBuffer.length} pre-roll chunks (${(this.preRollBuffer.reduce((s, c) => s + c.length, 0) / this.sampleRate * 1000).toFixed(0)}ms)`);
 
                 if (this.onSpeechStart) {
                     this.onSpeechStart();
@@ -165,27 +196,56 @@ class VoiceActivityDetector {
             console.log("Currently speaking?", this.isSpeaking);
 
             if (this.isSpeaking) {
-                // Start silence timer
+                // Check if timer is already running
                 if (this.silenceTimer) {
-                    console.log("Clearing previous silence timer");
-                    clearTimeout(this.silenceTimer);
+                    const timeSinceTimer = now - this.silenceTimerStarted;
+                    console.log(`⏲️ Silence timer already running (${timeSinceTimer}ms elapsed), not restarting`);
+                    return; // Don't restart timer - let it continue
                 }
 
+                // ⚠️ CRITICAL: Snapshot how many chunks we have when silence is first detected
+                // We'll continue capturing (in case speech resumes), but only count up to this point
+                this.audioChunksAtSilence = this.audioChunks.length;
+                console.log(`📸 Snapshot: ${this.audioChunksAtSilence} chunks captured when silence detected`);
+
                 console.log(`⏲️ Starting ${this.silenceDuration}ms silence timer`);
+                this.silenceTimerStarted = now; // Record when timer started
                 this.silenceTimer = setTimeout(() => {
-                    const speechDurationMs = this.lastSpeechTime - this.speechStartTime;
-                    console.log(`⏰ Silence timer fired! Speech duration: ${speechDurationMs}ms`);
+                    // Calculate ACTUAL duration from captured audio up to silence point
+                    // Only count chunks that existed when silence was first detected
+                    const chunksToCount = this.audioChunks.slice(0, this.audioChunksAtSilence);
+                    const totalSamples = chunksToCount.reduce((sum, chunk) => sum + chunk.length, 0);
+                    const actualDurationMs = (totalSamples / this.sampleRate) * 1000;
+
+                    console.log(`⏰ Silence timer fired!`);
+                    console.log(`   Chunks when silence detected: ${this.audioChunksAtSilence}`);
+                    console.log(`   Total chunks now: ${this.audioChunks.length}`);
+                    console.log(`   Actual audio duration: ${actualDurationMs.toFixed(0)}ms (${totalSamples} samples)`);
+                    console.log(`   Min required: ${this.minSpeechDuration}ms`);
 
                     // Only process if speech was long enough
-                    if (speechDurationMs >= this.minSpeechDuration) {
-                        console.log("✅ Speech long enough, ending speech");
+                    if (actualDurationMs >= this.minSpeechDuration) {
+                        console.log(`✅ Speech long enough (${actualDurationMs.toFixed(0)}ms >= ${this.minSpeechDuration}ms), ending speech`);
+                        // Trim chunks to only include audio up to silence point
+                        this.audioChunks = this.audioChunks.slice(0, this.audioChunksAtSilence);
                         this.endSpeech();
                     } else {
-                        // Speech was too short, discard
-                        console.log(`❌ Speech too short (${speechDurationMs}ms), discarding`);
+                        // Speech was too short, discard captured audio but keep pre-roll
+                        console.log(`❌ Speech too short (${actualDurationMs.toFixed(0)}ms < ${this.minSpeechDuration}ms), discarding`);
                         this.isSpeaking = false;
                         this.audioChunks = [];
+                        this.audioChunksAtSilence = 0;
+                        // Note: Do NOT clear preRollBuffer - it's a continuous circular buffer
+
+                        // Notify app that speech was rejected
+                        if (this.onSpeechTooShort) {
+                            this.onSpeechTooShort(actualDurationMs);
+                        }
                     }
+
+                    // Clear timer state
+                    this.silenceTimer = null;
+                    this.silenceTimerStarted = null;
                 }, this.silenceDuration);
             } else {
                 console.log("Not currently speaking, ignoring silence event");
@@ -196,11 +256,28 @@ class VoiceActivityDetector {
     }
 
     processAudioChunk(audioData) {
+        // Don't capture audio during playback
+        if (this.pausedForPlayback) {
+            return;
+        }
+
+        // Always maintain pre-roll buffer (circular buffer of last 200ms)
+        this.preRollBuffer.push(new Float32Array(audioData));
+
+        // Calculate total samples in buffer
+        let totalSamples = this.preRollBuffer.reduce((sum, chunk) => sum + chunk.length, 0);
+
+        // Trim buffer if it exceeds pre-roll duration
+        while (totalSamples > this.preRollSamples && this.preRollBuffer.length > 1) {
+            this.preRollBuffer.shift();
+            totalSamples = this.preRollBuffer.reduce((sum, chunk) => sum + chunk.length, 0);
+        }
+
         // Store audio chunk if we're in speech mode
+        // We continue capturing even after silence is detected (in case speech resumes)
+        // but will only process chunks up to the silence point when timer fires
         if (this.isSpeaking) {
             this.audioChunks.push(new Float32Array(audioData));
-            // Keep updating last speech time while we're capturing
-            this.lastSpeechTime = Date.now();
         }
     }
 
@@ -270,6 +347,12 @@ class VoiceActivityDetector {
     stop() {
         if (this.silenceTimer) {
             clearTimeout(this.silenceTimer);
+            this.silenceTimer = null;
+            this.silenceTimerStarted = null;
+        }
+        if (this.pauseTimeoutId) {
+            clearTimeout(this.pauseTimeoutId);
+            this.pauseTimeoutId = null;
         }
         if (this.captureNode) {
             this.captureNode.disconnect();
@@ -527,6 +610,36 @@ class WhisperTriggerApp {
                 console.log('Audio data length:', audioData.length, 'samples');
                 console.log('Audio duration:', (audioData.length / 16000).toFixed(2), 'seconds');
 
+                // ⚠️ CRITICAL: Set pause flag IMMEDIATELY to prevent new speech detection
+                // while we're processing this utterance
+                this.vad.pausedForPlayback = true;
+                this.vad.pauseTimestamp = Date.now();
+
+                // Safety timeout: Always clear pause flag after 30 seconds max
+                // This ensures VAD resumes even if something goes wrong
+                if (this.vad.pauseTimeoutId) {
+                    clearTimeout(this.vad.pauseTimeoutId);
+                }
+                this.vad.pauseTimeoutId = setTimeout(() => {
+                    console.warn('⚠️ SAFETY TIMEOUT: Forcibly clearing pause flag after 30s');
+                    this.vad.pausedForPlayback = false;
+                    this.vad.pauseTimestamp = 0;
+                    this.vad.pauseTimeoutId = null;
+                }, 30000);
+
+                // Reset speech state to prevent getting stuck
+                if (this.vad.silenceTimer) {
+                    clearTimeout(this.vad.silenceTimer);
+                    this.vad.silenceTimer = null;
+                    this.vad.silenceTimerStarted = null;
+                }
+                this.vad.isSpeaking = false;
+                this.vad.audioChunks = [];
+                this.vad.audioChunksAtSilence = 0;
+                // Note: Do NOT clear preRollBuffer - it should always be maintained
+
+                console.log('⏸️ VAD PAUSED for processing (state reset)');
+
                 this.updateStatus('Processing...', 'listening');
                 this.speechCount++;
                 this.elements.speechCount.textContent = this.speechCount;
@@ -535,6 +648,14 @@ class WhisperTriggerApp {
                 console.log('Sending to Whisper...');
 
                 await this.sendToWhisper(audioData);
+
+                // Note: pause flag will be cleared after mirror finishes speaking
+                // or immediately if no voice response is generated
+            };
+
+            this.vad.onSpeechTooShort = (duration) => {
+                console.log(`⚠️ Speech rejected (${duration.toFixed(0)}ms < ${this.vad.minSpeechDuration}ms)`);
+                this.updateStatus('👂 Listening for speech...', 'listening');
             };
 
             this.vad.onAudioLevel = (normalized, raw) => {
@@ -682,7 +803,18 @@ class WhisperTriggerApp {
                 // Generate creative prompt AND voice response for ANY non-empty command
                 if (commandText) {
                     this.generateCreativePrompt(commandText, Date.now(), isGarbled);
-                    this.generateMirrorResponse(commandText, isGarbled);
+                    await this.generateMirrorResponse(commandText, isGarbled);
+                } else {
+                    // No command found, resume VAD immediately
+                    if (this.vad) {
+                        if (this.vad.pauseTimeoutId) {
+                            clearTimeout(this.vad.pauseTimeoutId);
+                            this.vad.pauseTimeoutId = null;
+                        }
+                        this.vad.pausedForPlayback = false;
+                        this.vad.pauseTimestamp = 0;
+                        console.log('✅ VAD RESUMED (no command to process)');
+                    }
                 }
             } else {
                 console.log('Empty transcription received');
@@ -822,16 +954,46 @@ Return ONLY the final art prompt - no explanations, no meta-commentary, just pur
 
             if (!apiKey) {
                 console.log('No Groq API key for mirror response');
+                // Clear pause flag since we're not generating audio
+                if (this.vad) {
+                    if (this.vad.pauseTimeoutId) {
+                        clearTimeout(this.vad.pauseTimeoutId);
+                        this.vad.pauseTimeoutId = null;
+                    }
+                    this.vad.pausedForPlayback = false;
+                    this.vad.pauseTimestamp = 0;
+                    console.log('✅ VAD RESUMED (no Groq key)');
+                }
                 return;
             }
 
             if (ttsProvider === 'elevenlabs' && !elevenLabsKey) {
                 console.log('No ElevenLabs API key, skipping voice');
+                // Clear pause flag since we're not generating audio
+                if (this.vad) {
+                    if (this.vad.pauseTimeoutId) {
+                        clearTimeout(this.vad.pauseTimeoutId);
+                        this.vad.pauseTimeoutId = null;
+                    }
+                    this.vad.pausedForPlayback = false;
+                    this.vad.pauseTimestamp = 0;
+                    console.log('✅ VAD RESUMED (no ElevenLabs key)');
+                }
                 return;
             }
 
             if (ttsProvider === 'replicate' && !replicateKey) {
                 console.log('No Replicate API key, skipping voice');
+                // Clear pause flag since we're not generating audio
+                if (this.vad) {
+                    if (this.vad.pauseTimeoutId) {
+                        clearTimeout(this.vad.pauseTimeoutId);
+                        this.vad.pauseTimeoutId = null;
+                    }
+                    this.vad.pausedForPlayback = false;
+                    this.vad.pauseTimestamp = 0;
+                    console.log('✅ VAD RESUMED (no Replicate key)');
+                }
                 return;
             }
 
@@ -842,24 +1004,25 @@ Return ONLY the final art prompt - no explanations, no meta-commentary, just pur
                 '\n\n🔥 EXTRA AUDACIOUS MODE: The speech was garbled/unclear! Be EVEN MORE sarcastic, MORE mocking, MORE delightfully mean about their mumbling! Really wind them up!' :
                 '';
 
-            const rebukePrompt = `You are a DULL, BORING, SOUR, MOURNFUL magic mirror with a cutting wit. Someone just said: "${command}"
+            const rebukePrompt = `You are an EXTREMELY BORED, DULL, SOUR magic mirror. Someone just said: "${command}"
 
-Generate a WITTY, CHEEKY spoken rebuke that winds them up. Be:
-- Dull and monotone in tone but DEVASTATINGLY clever in content
-- Sour and mournful (let the voice actor handle the sighs)
-- Dripping with sarcasm and passive-aggression
-- Subtly insulting in a playful, theatrical way
-- Brief but CUTTING (1-2 sentences max)
+Generate a SHORT, MONOTONE rebuke (MAX 15 words). Be:
+- BORED and unimpressed
+- Deadpan and flat
+- Mildly sarcastic but mostly just exhausted
+- Sound like you're barely awake
+- ONE sentence only
 ${garbledExtra}
 
-CRITICAL: Return ONLY spoken dialogue - NO asterisks, NO stage directions, NO *sighs* or *actions*. The text-to-speech will read everything literally!
+CRITICAL: NO asterisks, NO stage directions, NO *sighs*. Keep it VERY short and VERY bored.
 
 Examples:
-- "Oh how delightful another vague request as if I haven't heard this one before how utterly thrilling for me"
-- "Marvellous another human mumbling at a mirror expecting miracles my existence is truly blessed"
-- "Yes yes another confused soul who thinks I'm their personal servant how wonderfully original"
+- "Oh how thrilling another vague request"
+- "Marvellous more mumbling how utterly delightful"
+- "Yes yes another incoherent noise wonderful"
+- "Fantastic another human who forgot how to speak"
 
-Return ONLY clean spoken text, nothing else.`;
+Return ONLY one SHORT bored sentence, max 15 words.`;
 
             const rebukeResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
                 method: 'POST',
@@ -870,8 +1033,8 @@ Return ONLY clean spoken text, nothing else.`;
                 body: JSON.stringify({
                     model: 'llama-3.3-70b-versatile',
                     messages: [{ role: 'user', content: rebukePrompt }],
-                    temperature: 1.2,
-                    max_tokens: 150
+                    temperature: 0.9,
+                    max_tokens: 50
                 })
             });
 
@@ -967,48 +1130,51 @@ Return ONLY clean spoken text, nothing else.`;
             const audioUrl = URL.createObjectURL(audioBlob);
 
             console.log('🔊 Playing mirror response...');
+            // Note: pause flag was already set in onSpeechEnd callback
 
-            // Set flag to prevent VAD/sampling during playback
-            this.isMirrorSpeaking = true;
-
-            // Pause VAD during playback (don't detect our own voice!)
-            if (this.vad) {
-                console.log('⏸️ Pausing VAD during mirror speech');
-                // Disconnect VAD and capture nodes
-                if (this.vad.vadNode) {
-                    this.vad.vadNode.disconnect();
-                }
-                if (this.vad.captureNode) {
-                    this.vad.captureNode.disconnect();
-                }
-            }
-
-            // Play the audio
-            this.mirrorAudio.src = audioUrl;
-            await this.mirrorAudio.play();
-
-            // Wait for audio to finish, then reconnect VAD
+            // Set up ended handler with 200ms delay
             this.mirrorAudio.onended = () => {
-                console.log('🔊 Mirror finished speaking');
+                console.log('🔊 Audio ended, waiting 200ms before resuming VAD...');
                 URL.revokeObjectURL(audioUrl);
 
-                // Clear speaking flag
-                this.isMirrorSpeaking = false;
-
-                // Reconnect VAD and capture
-                if (this.vad && this.vad.source) {
-                    console.log('▶️ Resuming VAD');
-                    if (this.vad.vadNode) {
-                        this.vad.source.connect(this.vad.vadNode);
-                    }
-                    if (this.vad.captureNode) {
-                        this.vad.source.connect(this.vad.captureNode);
-                    }
+                // Clear safety timeout
+                if (this.vad && this.vad.pauseTimeoutId) {
+                    clearTimeout(this.vad.pauseTimeoutId);
+                    this.vad.pauseTimeoutId = null;
                 }
+
+                // Wait 200ms to avoid detecting echo/feedback
+                setTimeout(() => {
+                    if (this.vad) {
+                        this.vad.pausedForPlayback = false;
+                        this.vad.pauseTimestamp = 0;
+                        console.log(`✅ VAD RESUMED after 200ms delay`);
+                    }
+                }, 200);
             };
+
+            // Play
+            this.mirrorAudio.src = audioUrl;
+            await this.mirrorAudio.play();
+            console.log('🔊 Audio playing...');
 
         } catch (error) {
             console.error('Mirror response error:', error);
+
+            // Clear pause flag on error so VAD can resume
+            if (this.vad) {
+                // Clear safety timeout
+                if (this.vad.pauseTimeoutId) {
+                    clearTimeout(this.vad.pauseTimeoutId);
+                    this.vad.pauseTimeoutId = null;
+                }
+
+                setTimeout(() => {
+                    this.vad.pausedForPlayback = false;
+                    this.vad.pauseTimestamp = 0;
+                    console.log('✅ VAD RESUMED after error');
+                }, 200);
+            }
         }
     }
 
