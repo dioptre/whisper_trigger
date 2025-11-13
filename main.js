@@ -31,41 +31,62 @@ class VoiceActivityDetector {
 
     async initialize() {
         try {
+            // Get audio constraints from options
+            const echoCancellation = this.options?.echoCancellation !== false;
+            const noiseSuppression = this.options?.noiseSuppression !== false;
+            const autoGainControl = this.options?.autoGainControl !== false;
+
             // Request microphone access
             this.mediaStream = await navigator.mediaDevices.getUserMedia({
                 audio: {
-                    echoCancellation: true,
-                    noiseSuppression: true,
-                    autoGainControl: true,
+                    echoCancellation,
+                    noiseSuppression,
+                    autoGainControl,
                     sampleRate: this.sampleRate
                 }
             });
+
+            console.log('Audio constraints:', { echoCancellation, noiseSuppression, autoGainControl });
 
             // Create audio context with target sample rate
             this.audioContext = new (window.AudioContext || window.webkitAudioContext)({
                 sampleRate: this.sampleRate
             });
 
-            // Load AudioWorklet modules
-            await this.audioContext.audioWorklet.addModule("/vad-audio-worklet.js");
-            await this.audioContext.audioWorklet.addModule("/audio-capture-worklet.js");
+            // Load AudioWorklet modules with cache busting
+            const cacheBust = Date.now();
+            await this.audioContext.audioWorklet.addModule(`/vad-audio-worklet.js?v=${cacheBust}`);
+            await this.audioContext.audioWorklet.addModule(`/audio-capture-worklet.js?v=${cacheBust}`);
 
             // Create VAD node with initial thresholds
+            const fftSize = parseInt(this.options?.fftSize || 128);
+            const vadDebug = this.options?.vadDebug !== false;
+
             this.vadNode = new AudioWorkletNode(this.audioContext, "vad", {
                 outputChannelCount: [1],
                 processorOptions: {
                     sampleRate: this.audioContext.sampleRate,
-                    fftSize: 128,
-                    energyThreshold: parseFloat(this.options?.energyThreshold || 40),
-                    frequencyThreshold: parseFloat(this.options?.frequencyThreshold || 185),
-                    sfmThreshold: parseFloat(this.options?.sfmThreshold || 5),
-                    debug: false // Set to true for debugging
+                    fftSize: fftSize,
+                    energyThreshold: parseFloat(this.options?.energyThreshold || 25),
+                    frequencyThreshold: parseFloat(this.options?.frequencyThreshold || 120),
+                    sfmThreshold: parseFloat(this.options?.sfmThreshold || 8),
+                    debug: vadDebug
                 }
             });
 
+            console.log('VAD initialized with:', { fftSize, vadDebug });
+
             // Listen for VAD events
             this.vadNode.port.onmessage = (event) => {
-                this.handleVADEvent(event.data);
+                if (event.data.cmd === 'log') {
+                    // Debug logging from VAD - only show if count > 0
+                    const data = event.data.data;
+                    if (data.count > 0) {
+                        console.log(`🎯 VAD [Frame ${data.frame}] count=${data.count}, speech=${data.speech_frames}, silence=${data.silence_frames}`, data);
+                    }
+                } else {
+                    this.handleVADEvent(event.data);
+                }
             };
 
             // Create audio capture worklet (replaces ScriptProcessor)
@@ -354,10 +375,20 @@ class WhisperTriggerApp {
             frequencyThresholdValue: document.getElementById('frequencyThresholdValue'),
             sfmThreshold: document.getElementById('sfmThreshold'),
             sfmThresholdValue: document.getElementById('sfmThresholdValue'),
+            fftSize: document.getElementById('fftSize'),
+            fftSizeValue: document.getElementById('fftSizeValue'),
+            vadDebug: document.getElementById('vadDebug'),
+            speechFrame: document.getElementById('speechFrame'),
+            speechFrameValue: document.getElementById('speechFrameValue'),
+            silenceFrame: document.getElementById('silenceFrame'),
+            silenceFrameValue: document.getElementById('silenceFrameValue'),
             minDuration: document.getElementById('minDuration'),
             minDurationValue: document.getElementById('minDurationValue'),
             silenceDuration: document.getElementById('silenceDuration'),
             silenceDurationValue: document.getElementById('silenceDurationValue'),
+            echoCancellation: document.getElementById('echoCancellation'),
+            noiseSuppression: document.getElementById('noiseSuppression'),
+            autoGainControl: document.getElementById('autoGainControl'),
             wakeWordToggle: document.getElementById('wakeWordToggle'),
             wakeWord: document.getElementById('wakeWord'),
             wakeWordInput: document.getElementById('wakeWordInput'),
@@ -407,6 +438,25 @@ class WhisperTriggerApp {
             this.updateVADThresholds();
         });
 
+        this.elements.fftSize.addEventListener('change', (e) => {
+            this.elements.fftSizeValue.textContent = e.target.value;
+            console.log('FFT size changed to:', e.target.value, '(restart required)');
+        });
+
+        this.elements.speechFrame.addEventListener('input', (e) => {
+            this.elements.speechFrameValue.textContent = e.target.value;
+            this.updateFrameThresholds();
+        });
+
+        this.elements.silenceFrame.addEventListener('input', (e) => {
+            this.elements.silenceFrameValue.textContent = e.target.value;
+            this.updateFrameThresholds();
+        });
+
+        this.elements.vadDebug.addEventListener('change', (e) => {
+            this.updateDebugMode(e.target.checked);
+        });
+
         this.elements.minDuration.addEventListener('input', (e) => {
             this.elements.minDurationValue.textContent = e.target.value;
             if (this.vad) {
@@ -427,13 +477,20 @@ class WhisperTriggerApp {
             this.elements.startBtn.disabled = true;
             this.updateStatus('Initializing...', 'listening');
 
-            // Create VAD instance with threshold settings
+            // Create VAD instance with all settings
             this.vad = new VoiceActivityDetector({
                 minSpeechDuration: parseInt(this.elements.minDuration.value),
                 silenceDuration: parseInt(this.elements.silenceDuration.value),
                 energyThreshold: parseFloat(this.elements.energyThreshold.value),
                 frequencyThreshold: parseFloat(this.elements.frequencyThreshold.value),
-                sfmThreshold: parseFloat(this.elements.sfmThreshold.value)
+                sfmThreshold: parseFloat(this.elements.sfmThreshold.value),
+                speechFrameThreshold: parseInt(this.elements.speechFrame.value),
+                silenceFrameThreshold: parseInt(this.elements.silenceFrame.value),
+                fftSize: parseInt(this.elements.fftSize.value),
+                vadDebug: this.elements.vadDebug.checked,
+                echoCancellation: this.elements.echoCancellation.checked,
+                noiseSuppression: this.elements.noiseSuppression.checked,
+                autoGainControl: this.elements.autoGainControl.checked
             });
 
             // Set up callbacks
@@ -672,6 +729,36 @@ class WhisperTriggerApp {
 
         console.log('Sending threshold update to VAD:', thresholds);
         this.vad.vadNode.port.postMessage(thresholds);
+    }
+
+    updateFrameThresholds() {
+        if (!this.vad || !this.vad.vadNode) {
+            console.log('VAD not initialized yet');
+            return;
+        }
+
+        const frameThresholds = {
+            type: 'updateFrameThresholds',
+            speechFrames: parseInt(this.elements.speechFrame.value),
+            silenceFrames: parseInt(this.elements.silenceFrame.value)
+        };
+
+        console.log('Sending frame threshold update to VAD:', frameThresholds);
+        this.vad.vadNode.port.postMessage(frameThresholds);
+    }
+
+    updateDebugMode(enabled) {
+        if (!this.vad || !this.vad.vadNode) {
+            console.log('VAD not initialized yet');
+            return;
+        }
+
+        this.vad.vadNode.port.postMessage({
+            type: 'setDebug',
+            debug: enabled
+        });
+
+        console.log('VAD debug mode:', enabled ? 'ENABLED' : 'DISABLED');
     }
 
     updateStatus(text, state) {

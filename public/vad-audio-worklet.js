@@ -19,6 +19,8 @@ class AudioVADProcessor extends AudioWorkletProcessor {
   f_min = null;
   sfm_min = null;
 
+  baselines_ready = false;
+
   sample_rate;
   fft_size = 128;
   fft; // FFT.js instance
@@ -27,7 +29,7 @@ class AudioVADProcessor extends AudioWorkletProcessor {
   frame_size;
   frame_counter = 0;
 
-  last_command_was_speech = true;
+  last_command_was_speech = false; // FIXED: Start with false so first speech event can fire!
 
   debug = false;
 
@@ -50,6 +52,10 @@ class AudioVADProcessor extends AudioWorkletProcessor {
     this.fft = new FFT(this.fft_size);
     this.frame_size = (this.sample_rate * this.frame_size_ms) / 1000;
 
+    // Store frame thresholds
+    this.speechFrameThreshold = 4;
+    this.silenceFrameThreshold = 10;
+
     // Listen for parameter updates from main thread
     this.port.onmessage = (event) => {
       if (event.data.type === 'updateThresholds') {
@@ -61,6 +67,16 @@ class AudioVADProcessor extends AudioWorkletProcessor {
           frequency: this.primThresh_f_hz,
           sfm: this.primThresh_sfm
         });
+      } else if (event.data.type === 'updateFrameThresholds') {
+        this.speechFrameThreshold = event.data.speechFrames ?? this.speechFrameThreshold;
+        this.silenceFrameThreshold = event.data.silenceFrames ?? this.silenceFrameThreshold;
+        console.log('Frame thresholds updated:', {
+          speech: this.speechFrameThreshold,
+          silence: this.silenceFrameThreshold
+        });
+      } else if (event.data.type === 'setDebug') {
+        this.debug = event.data.debug ?? this.debug;
+        console.log('Debug mode:', this.debug ? 'ENABLED' : 'DISABLED');
       }
     };
   }
@@ -178,69 +194,99 @@ class AudioVADProcessor extends AudioWorkletProcessor {
     sfm = isFinite(sfm) ? sfm : 0;
 
     // set initial min values from first 30 frames
-    if (this.e_min === null || this.frame_counter < 30) {
-      this.e_min = this.e_min > energy && energy !== 0 ? this.e_min : energy;
-      this.f_min = this.f_min > f_max_hz ? f_max_hz : this.f_min;
-      this.sfm_min = this.sfm_min > sfm ? sfm : this.sfm_min;
+    if (!this.baselines_ready) {
+      if (this.frame_counter <= 30) {
+        // Collect baseline values during initialization
+        if (this.e_min === null) {
+          this.e_min = energy;
+        } else {
+          this.e_min = Math.min(this.e_min, energy);
+        }
+
+        if (this.f_min === null) {
+          this.f_min = f_max_hz;
+        } else {
+          this.f_min = Math.min(this.f_min, f_max_hz);
+        }
+
+        if (this.sfm_min === null) {
+          this.sfm_min = sfm;
+        } else {
+          this.sfm_min = Math.min(this.sfm_min, sfm);
+        }
+
+        if (this.frame_counter === 30) {
+          // Check if we actually got real baseline values
+          if (this.e_min > 0 && this.f_min > 0) {
+            this.baselines_ready = true;
+            console.log('✅ VAD baselines established:', {
+              e_min: this.e_min,
+              f_min: this.f_min,
+              sfm_min: this.sfm_min
+            });
+          } else {
+            console.warn('⚠️ Baselines are 0 - continuing to collect data...');
+            // Keep collecting for another 30 frames
+            this.frame_counter = 0;
+          }
+        }
+      }
     }
 
     // frame vad counter
     let count = 0;
 
-    // calculate current energy threshold
-    const current_thresh_e = this.primThresh_e * Math.log10(this.e_min);
+    // check energy threshold (skip if baseline is 0)
+    // Use ratio instead of log (simpler and more reliable)
+    if (this.e_min > 0 && energy > 0) {
+      const energyRatio = energy / this.e_min;
+      // Speech is typically 10-100x louder than ambient noise
+      if (energyRatio > 5.0) { // Require 5x increase above baseline
+        count++;
+      }
+    }
 
-    // check energy threshold
-    if (energy - this.e_min >= current_thresh_e) {
+    // check frequency threshold (skip if baseline is 0)
+    if (this.f_min > 0 && f_max > 1 && f_max_hz - this.f_min >= this.primThresh_f_hz) {
       count++;
     }
 
-    // check frequency threshold
-    if (f_max > 1 && f_max_hz - this.f_min >= this.primThresh_f_hz) {
+    // check spectral flatness threshold (skip if baseline is 0)
+    if (this.sfm_min > 0 && sfm > 0 && sfm - this.sfm_min <= this.primThresh_sfm) {
       count++;
     }
 
-    // check spectral flatness threshold
-    if (sfm > 0 && sfm - this.sfm_min <= this.primThresh_sfm) {
-      count++;
-    }
+    // SIMPLE ENERGY-BASED DETECTION - ignore baselines completely
+    const isSpeech = energy > 0.01; // Simple absolute threshold
 
-    // check zero-crossing rate (speech typically has ZCR between 0.1-0.3)
-    // Lower ZCR = voiced sounds (vowels), Higher ZCR = unvoiced sounds (consonants)
-    if (zcr > 0.05 && zcr < 0.5) {
-      count++;
-    }
-
-    if (count > 2) {
-      // is speech (raised threshold since we added ZCR)
+    if (isSpeech) {
       this.is_speech_frame_counter++;
       this.is_silent_frame_counter = 0;
     } else {
-      // is silence, so update min energy value
       this.is_silent_frame_counter++;
-      this.e_min =
-        (this.is_silent_frame_counter * this.e_min + energy) /
-        (this.is_silent_frame_counter + 1);
       this.is_speech_frame_counter = 0;
     }
 
-    // debug
-    if (this.debug) {
+    // Only log when count changes or every 50 frames
+    if (this.debug && (count > 0 || this.frame_counter % 50 === 0)) {
       this.post("log", {
-        size: inputs[0][0].length,
-        sampleRate: this.sample_rate,
+        frame: this.frame_counter,
         e: energy,
-        e_true: energy - this.e_min >= current_thresh_e,
+        e_min: this.e_min,
         f: f_max_hz,
-        f_true: f_max > 1 && f_max_hz - this.f_min >= this.primThresh_f_hz,
+        f_min: this.f_min,
         sfm: sfm,
-        sfm_true: sfm - this.sfm_min <= this.primThresh_sfm,
-        plot: sfm_sum_ari / frequencyData.length,
+        sfm_min: this.sfm_min,
+        zcr: zcr,
+        count: count,
+        speech_frames: this.is_speech_frame_counter,
+        silence_frames: this.is_silent_frame_counter
       });
     }
 
-    // ignore silence if less than 10 frames
-    if (this.is_silent_frame_counter > 10 && this.last_command_was_speech) {
+    // ignore silence if less than threshold
+    if (this.is_silent_frame_counter > this.silenceFrameThreshold && this.last_command_was_speech) {
+      console.log(`🔇 SILENCE EVENT! (${this.is_silent_frame_counter} frames)`);
       if (this.debug) {
         this.post("silence", { signal: sfm_sum_ari / frequencyData.length });
       } else {
@@ -250,8 +296,9 @@ class AudioVADProcessor extends AudioWorkletProcessor {
       this.last_command_was_speech = false;
     }
 
-    // ignore speech if less than 5 frames
-    if (this.is_speech_frame_counter > 4 && !this.last_command_was_speech) {
+    // ignore speech if less than threshold
+    if (this.is_speech_frame_counter > this.speechFrameThreshold && !this.last_command_was_speech) {
+      console.log(`🎤 SPEECH EVENT! (${this.is_speech_frame_counter} frames)`);
       if (this.debug) {
         this.post("speech", { signal: sfm_sum_ari / frequencyData.length });
       } else {
