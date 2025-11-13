@@ -1,6 +1,10 @@
 # 🪞 Mirror Mirror - Wake Word Detection + Real-time Transcription
 
-A real-time voice activity detection (VAD) system with wake word support that captures speech and transcribes it using Groq's Whisper API. Say "mirror mirror on the wall" followed by your command!
+A **100% frontend** real-time voice activity detection (VAD) system with wake word support that captures speech and transcribes it using Groq's Whisper API. Say "mirror on the wall" followed by your command!
+
+**[🚀 Try the Live Demo](https://dioptre.github.io/whisper_trigger/)**
+
+![Mirror Mirror Demo](https://img.shields.io/badge/Status-Frontend%20Only-brightgreen) ![Groq Whisper](https://img.shields.io/badge/Powered%20by-Groq%20Whisper-blue)
 
 ## Features
 
@@ -37,38 +41,58 @@ A real-time voice activity detection (VAD) system with wake word support that ca
 5. **Transcription**: Sends accumulated audio to Groq Whisper API
 6. **Display**: Shows transcription results in real-time
 
-## Setup
+## 🚀 Quick Start
 
-### Prerequisites
+### Option 1: Use the Live Demo
 
-- A Groq API key (get one at https://console.groq.com/)
-- Modern browser with Web Audio API support
+**[Try it now →](https://yourusername.github.io/whisper_trigger/)**
 
-### Installation
+1. Visit the demo link
+2. Get your Groq API key from [console.groq.com](https://console.groq.com/)
+3. Paste it in the settings
+4. Click "Start Listening" and say: "mirror on the wall, hello world"
 
-**Option 1: With Vite dev server (recommended for development)**
+### Option 2: Run Locally
 
-1. Install dependencies:
+1. **Clone and install:**
+   ```bash
+   git clone https://github.com/yourusername/whisper_trigger.git
+   cd whisper_trigger
+   npm install
+   ```
+
+2. **Set up your API key:**
+   ```bash
+   cp .env.example .env
+   # Edit .env and add your Groq API key:
+   # VITE_GROQ_API_KEY=your_key_here
+   ```
+
+3. **Start dev server:**
+   ```bash
+   npm run dev
+   ```
+
+4. **Open http://localhost:5173** and start talking!
+
+### Option 3: Deploy Your Own
+
+**GitHub Pages (free):**
 ```bash
-npm install
+npm run build
+# Then enable GitHub Pages in your repo settings
 ```
 
-2. Start dev server:
+**Netlify/Vercel:**
 ```bash
-npm run dev
+# Just connect your repo - they auto-detect Vite
 ```
 
-3. Open your browser to http://localhost:5173
-4. Paste your Groq API key in the settings
-5. Click "Start Listening"!
-
-**Option 2: No build tools (just open the file)**
-
-1. Open `index.html` directly in your browser
-2. Paste your Groq API key in the settings
-3. Click "Start Listening"!
-
-That's it! **No backend server required** - everything runs in your browser.
+**Static hosting:**
+```bash
+npm run build
+# Upload the dist/ folder anywhere
+```
 
 ## Usage
 
@@ -313,19 +337,92 @@ Health check endpoint.
 - [ ] Tunable VAD thresholds (currently hardcoded in worklet)
 - [ ] WebRTC VAD as alternative/comparison
 
-## References
+## 🚀 Deployment
 
+### GitHub Pages (Automated)
+
+This repo includes a GitHub Actions workflow that automatically deploys to GitHub Pages on every push to `main`.
+
+**Setup:**
+
+1. **Push to GitHub:**
+   ```bash
+   git init
+   git add .
+   git commit -m "Initial commit"
+   git remote add origin https://github.com/yourusername/whisper_trigger.git
+   git push -u origin main
+   ```
+
+2. **Enable GitHub Pages:**
+   - Go to your repo → Settings → Pages
+   - Source: GitHub Actions
+   - Save
+
+3. **Access your site:**
+   - https://yourusername.github.io/whisper_trigger/
+
+The workflow will automatically build and deploy on every push!
+
+### Manual Deployment
+
+**Build for production:**
+```bash
+npm run build
+```
+
+This creates a `dist/` folder with your static site. Upload it to:
+- **Netlify**: Drag & drop the `dist/` folder
+- **Vercel**: `vercel --prod`
+- **Any static host**: Upload `dist/` contents
+
+**For production apps**, consider:
+- Backend proxy server (adds auth layer)
+- OAuth/JWT tokens
+- Per-user API keys
+
+## 📊 Performance
+
+- **VAD Latency**: 40-100ms (FFT analysis)
+- **Silence Detection**: Configurable (default: 3.3s)
+- **Groq Response**: 200-800ms
+- **Total Latency**: ~4-5 seconds from speech end to result
+
+## 🤝 Contributing
+
+Contributions welcome! Please:
+
+1. Fork the repo
+2. Create a feature branch: `git checkout -b feature/amazing-feature`
+3. Commit your changes: `git commit -m 'Add amazing feature'`
+4. Push to the branch: `git push origin feature/amazing-feature`
+5. Open a Pull Request
+
+## 📄 License
+
+MIT License - See [LICENSE](LICENSE) for details
+
+## 🙏 Credits
+
+Built with:
+- [Groq Whisper API](https://console.groq.com/docs/speech-text) - Fast speech-to-text
+- [VAD AudioWorklet](https://github.com/thurti/vad-audio-worklet) - Voice activity detection
+- [FFT.js](https://github.com/indutny/fft.js/) - Fast Fourier Transform
+- [Vite](https://vitejs.dev/) - Build tool
+
+Inspired by:
 - [Moattar & Homayoonpoor VAD Paper](https://www.researchgate.net/publication/255667085_A_simple_but_efficient_real-time_voice_activity_detection_algorithm)
-- [VAD AudioWorklet Implementation](https://github.com/thurti/vad-audio-worklet) - MIT License
-- [FFT.js](https://github.com/indutny/fft.js/) - Fast Fourier Transform library
-- [Web Audio API Documentation](https://developer.mozilla.org/en-US/docs/Web/API/Web_Audio_API)
-- [AudioWorklet](https://developer.mozilla.org/en-US/docs/Web/API/AudioWorklet)
-- [Groq Whisper API](https://console.groq.com/docs/speech-text)
 - [Processing Web Audio with Rust and WASM](https://whoisryosuke.com/blog/2023/processing-web-audio-with-rust-and-wasm/)
 
-## License
+## 📞 Support
 
-MIT
+- 🐛 [Report bugs](https://github.com/yourusername/whisper_trigger/issues)
+- 💡 [Request features](https://github.com/yourusername/whisper_trigger/issues)
+- 📖 [Read the docs](FRONTEND_ONLY.md)
+
+---
+
+**Made with ❤️ and AI assistance**
 
 ## Security Notice
 
