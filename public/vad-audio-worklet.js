@@ -85,12 +85,24 @@ class AudioVADProcessor extends AudioWorkletProcessor {
         this.debug = event.data.debug ?? this.debug;
         console.log('Debug mode:', this.debug ? 'ENABLED' : 'DISABLED');
       } else if (event.data.type === 'reset') {
-        // Reset all counters
+        // Reset all counters AND baselines
         this.is_speech_frame_counter = 0;
         this.is_silent_frame_counter = 0;
         this.last_command_was_speech = false;
         this.continuous_speech_frames = 0;
-        console.log('VAD state reset');
+
+        // Clear baseline samples to force reinitialization
+        this.baseline_samples = [];
+        this.baselines_ready = false;
+        this.sample_counter = 0;
+        this.next_sample_frame = this.frame_counter + 5; // Start sampling in 5 frames
+
+        // Reset min values
+        this.e_min = null;
+        this.f_min = null;
+        this.sfm_min = null;
+
+        console.log('🔄 VAD reset complete - rebaselining...');
       }
     };
   }

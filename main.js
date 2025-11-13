@@ -28,6 +28,10 @@ class VoiceActivityDetector {
         // Silence timer state
         this.silenceTimerStarted = null; // When the silence timer was started
 
+        // Maximum capture timeout (30s)
+        this.maxCaptureTimeout = null;
+        this.maxCaptureDuration = 30000; // 30 seconds max
+
         this.audioContext = null;
         this.mediaStream = null;
         this.vadNode = null;
@@ -183,6 +187,40 @@ class VoiceActivityDetector {
                 this.audioChunks = [...this.preRollBuffer];
                 console.log(`  Added ${this.preRollBuffer.length} pre-roll chunks (${(this.preRollBuffer.reduce((s, c) => s + c.length, 0) / this.sampleRate * 1000).toFixed(0)}ms)`);
 
+                // Start maximum capture timeout (30s)
+                if (this.maxCaptureTimeout) {
+                    clearTimeout(this.maxCaptureTimeout);
+                }
+                this.maxCaptureTimeout = setTimeout(() => {
+                    console.error(`🚨 CAPTURE TIMEOUT! Speech capture exceeded ${this.maxCaptureDuration/1000}s (likely music/background noise)`);
+                    console.log('📊 Requesting VAD rebaseline...');
+
+                    // Reset VAD - send reset command to worklet
+                    if (this.vadNode) {
+                        this.vadNode.port.postMessage({ type: 'reset' });
+                    }
+
+                    // Discard captured audio and reset state
+                    this.isSpeaking = false;
+                    this.audioChunks = [];
+                    this.audioChunksAtSilence = 0;
+
+                    // Clear any pending timers
+                    if (this.silenceTimer) {
+                        clearTimeout(this.silenceTimer);
+                        this.silenceTimer = null;
+                        this.silenceTimerStarted = null;
+                    }
+                    this.maxCaptureTimeout = null;
+
+                    // Notify app
+                    if (this.onSpeechTooShort) {
+                        this.onSpeechTooShort(this.maxCaptureDuration);
+                    }
+
+                    console.log('✅ VAD reset complete, listening again');
+                }, this.maxCaptureDuration);
+
                 if (this.onSpeechStart) {
                     this.onSpeechStart();
                 }
@@ -222,6 +260,12 @@ class VoiceActivityDetector {
                     console.log(`   Total chunks now: ${this.audioChunks.length}`);
                     console.log(`   Actual audio duration: ${actualDurationMs.toFixed(0)}ms (${totalSamples} samples)`);
                     console.log(`   Min required: ${this.minSpeechDuration}ms`);
+
+                    // Clear max capture timeout
+                    if (this.maxCaptureTimeout) {
+                        clearTimeout(this.maxCaptureTimeout);
+                        this.maxCaptureTimeout = null;
+                    }
 
                     // Only process if speech was long enough
                     if (actualDurationMs >= this.minSpeechDuration) {
@@ -349,6 +393,10 @@ class VoiceActivityDetector {
             clearTimeout(this.silenceTimer);
             this.silenceTimer = null;
             this.silenceTimerStarted = null;
+        }
+        if (this.maxCaptureTimeout) {
+            clearTimeout(this.maxCaptureTimeout);
+            this.maxCaptureTimeout = null;
         }
         if (this.pauseTimeoutId) {
             clearTimeout(this.pauseTimeoutId);
@@ -654,8 +702,13 @@ class WhisperTriggerApp {
             };
 
             this.vad.onSpeechTooShort = (duration) => {
-                console.log(`⚠️ Speech rejected (${duration.toFixed(0)}ms < ${this.vad.minSpeechDuration}ms)`);
-                this.updateStatus('👂 Listening for speech...', 'listening');
+                if (duration >= this.vad.maxCaptureDuration) {
+                    console.log(`⚠️ Speech capture timeout (${duration/1000}s) - likely background noise/music`);
+                    this.updateStatus('👂 Listening for speech... (VAD reset)', 'listening');
+                } else {
+                    console.log(`⚠️ Speech rejected (${duration.toFixed(0)}ms < ${this.vad.minSpeechDuration}ms)`);
+                    this.updateStatus('👂 Listening for speech...', 'listening');
+                }
             };
 
             this.vad.onAudioLevel = (normalized, raw) => {
