@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mirror Mirror - Wake Word Detection</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 600px;
+            width: 100%;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 2em;
+        }
+
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 0.9em;
+        }
+
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 20px;
+            padding: 15px;
+            border-radius: 10px;
+            background: #f5f5f5;
+        }
+
+        .status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #ccc;
+            transition: all 0.3s ease;
+        }
+
+        .status-indicator.listening {
+            background: #4CAF50;
+            box-shadow: 0 0 10px #4CAF50;
+            animation: pulse 2s infinite;
+        }
+
+        .status-indicator.speaking {
+            background: #f44336;
+            box-shadow: 0 0 10px #f44336;
+            animation: pulse 0.5s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        button {
+            width: 100%;
+            padding: 15px 30px;
+            font-size: 1.1em;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }
+
+        #startBtn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        #startBtn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+        }
+
+        #startBtn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        #stopBtn {
+            background: #f44336;
+            color: white;
+            display: none;
+        }
+
+        #stopBtn:hover {
+            background: #d32f2f;
+        }
+
+        .metrics {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+            margin: 20px 0;
+        }
+
+        .metric {
+            padding: 15px;
+            background: #f5f5f5;
+            border-radius: 10px;
+        }
+
+        .metric-label {
+            font-size: 0.8em;
+            color: #666;
+            margin-bottom: 5px;
+        }
+
+        .metric-value {
+            font-size: 1.5em;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .volume-bar {
+            width: 100%;
+            height: 8px;
+            background: #e0e0e0;
+            border-radius: 4px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+
+        .volume-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #4CAF50, #f44336);
+            width: 0%;
+            transition: width 0.1s ease;
+        }
+
+        .transcription {
+            margin-top: 20px;
+            padding: 20px;
+            background: #f9f9f9;
+            border-radius: 10px;
+            border-left: 4px solid #667eea;
+            display: none;
+        }
+
+        .transcription.show {
+            display: block;
+        }
+
+        .transcription-label {
+            font-size: 0.9em;
+            color: #666;
+            margin-bottom: 10px;
+            font-weight: 600;
+        }
+
+        .transcription-text {
+            color: #333;
+            line-height: 1.6;
+            white-space: pre-wrap;
+        }
+
+        .settings {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f5f5f5;
+            border-radius: 10px;
+        }
+
+        .settings-title {
+            font-weight: 600;
+            margin-bottom: 10px;
+            color: #333;
+        }
+
+        .setting-item {
+            margin-bottom: 15px;
+        }
+
+        .setting-item label {
+            display: block;
+            font-size: 0.9em;
+            color: #666;
+            margin-bottom: 5px;
+        }
+
+        .setting-item input[type="range"] {
+            width: 100%;
+        }
+
+        .setting-item .value-display {
+            display: inline-block;
+            margin-left: 10px;
+            font-weight: 600;
+            color: #667eea;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 10px;
+            color: #667eea;
+            font-weight: 600;
+        }
+
+        .loading.show {
+            display: block;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #667eea;
+            border-top-color: transparent;
+            border-radius: 50%;
+            animation: spin 0.6s linear infinite;
+            margin-right: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🪞 Mirror Mirror</h1>
+        <p class="subtitle">Wake word detection + Real-time transcription</p>
+
+        <div class="status">
+            <div class="status-indicator" id="statusIndicator"></div>
+            <span id="statusText">Ready to start</span>
+        </div>
+
+        <button id="startBtn">Start Listening</button>
+        <button id="stopBtn">Stop Listening</button>
+
+        <div class="volume-bar">
+            <div class="volume-fill" id="volumeFill"></div>
+        </div>
+
+        <div class="metrics">
+            <div class="metric">
+                <div class="metric-label">Audio Level</div>
+                <div class="metric-value" id="audioLevel">0</div>
+            </div>
+            <div class="metric">
+                <div class="metric-label">Speech Detected</div>
+                <div class="metric-value" id="speechCount">0</div>
+            </div>
+        </div>
+
+        <div class="loading" id="loading">
+            <span class="spinner"></span>
+            <span>Processing audio...</span>
+        </div>
+
+        <div class="transcription" id="transcription">
+            <div class="transcription-label">📝 Raw Transcriptions (from Groq):</div>
+            <textarea id="transcriptionText" readonly
+                style="width: 100%; min-height: 150px; padding: 10px; border: 1px solid #ddd; border-radius: 5px; font-family: inherit; font-size: 0.9em; resize: vertical; margin-bottom: 15px;"></textarea>
+
+            <div class="transcription-label">💬 Commands (after "mirror mirror"):</div>
+            <textarea id="commandText" readonly
+                style="width: 100%; min-height: 150px; padding: 10px; border: 1px solid #667eea; border-radius: 5px; font-family: inherit; font-size: 0.9em; resize: vertical; background: #f0f4ff;"></textarea>
+        </div>
+
+        <div class="settings">
+            <div class="settings-title">API Configuration</div>
+            <div class="setting-item">
+                <label>
+                    Groq API Key:
+                </label>
+                <input type="password" id="apiKey" value=""
+                       placeholder="Auto-loads from .env or enter manually"
+                       style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 5px; font-size: 0.9em; font-family: monospace;">
+                <div style="font-size: 0.75em; color: #999; margin-top: 5px;">
+                    Get your API key from <a href="https://console.groq.com/" target="_blank" style="color: #667eea;">console.groq.com</a>
+                </div>
+            </div>
+        </div>
+
+        <div class="settings" style="margin-top: 15px;">
+            <div class="settings-title">Wake Word Detection</div>
+            <div class="setting-item">
+                <label style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Enable Wake Word Mode</span>
+                    <input type="checkbox" id="wakeWordToggle" checked style="width: auto; margin: 0;">
+                </label>
+            </div>
+            <div class="setting-item" id="wakeWordInput">
+                <label>
+                    Wake Word:
+                </label>
+                <input type="text" id="wakeWord" value="mirror on the wall"
+                       style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 5px; font-size: 0.9em;">
+            </div>
+            <div style="font-size: 0.85em; color: #666; padding: 10px; background: #f9f9f9; border-radius: 5px; margin-top: 10px;">
+                💡 Say the wake word followed by your command. The system will only transcribe text after detecting the wake word.
+            </div>
+        </div>
+
+        <div class="settings" style="margin-top: 15px;">
+            <div class="settings-title">Advanced Settings</div>
+            <div class="setting-item">
+                <label>
+                    VAD Threshold (Energy):
+                    <span class="value-display" id="thresholdValue">0.02</span>
+                </label>
+                <input type="range" id="threshold" min="0.001" max="0.1" step="0.001" value="0.02">
+            </div>
+            <div class="setting-item">
+                <label>
+                    Min Speech Duration (ms):
+                    <span class="value-display" id="minDurationValue">300</span>
+                </label>
+                <input type="range" id="minDuration" min="100" max="2000" step="100" value="300">
+            </div>
+            <div class="setting-item">
+                <label>
+                    Silence Duration (ms):
+                    <span class="value-display" id="silenceDurationValue">3300</span>
+                </label>
+                <input type="range" id="silenceDuration" min="500" max="5000" step="100" value="3300">
+            </div>
+        </div>
+    </div>
+
+    <script type="module" src="/main.js"></script>
+</body>
+</html>

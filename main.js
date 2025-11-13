@@ -1,0 +1,646 @@
+// Voice Activity Detection using AudioWorklet and FFT-based algorithm
+// Based on: Moattar & Homayoonpoor (2010) paper
+// Using: https://github.com/thurti/vad-audio-worklet
+
+class VoiceActivityDetector {
+    constructor(options = {}) {
+        this.minSpeechDuration = options.minSpeechDuration || 300; // ms
+        this.silenceDuration = options.silenceDuration || 1000; // ms
+        this.sampleRate = 16000; // Whisper expects 16kHz
+
+        this.isSpeaking = false;
+        this.speechStartTime = null;
+        this.lastSpeechTime = null;
+        this.audioChunks = [];
+
+        this.audioContext = null;
+        this.mediaStream = null;
+        this.vadNode = null;
+        this.analyser = null;
+        this.processor = null;
+        this.source = null;
+
+        this.onSpeechStart = null;
+        this.onSpeechEnd = null;
+        this.onAudioLevel = null;
+
+        // Silence timer
+        this.silenceTimer = null;
+    }
+
+    async initialize() {
+        try {
+            // Request microphone access
+            this.mediaStream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true,
+                    sampleRate: this.sampleRate
+                }
+            });
+
+            // Create audio context with target sample rate
+            this.audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                sampleRate: this.sampleRate
+            });
+
+            // Load VAD AudioWorklet
+            await this.audioContext.audioWorklet.addModule("/vad-audio-worklet.js");
+
+            // Create VAD node
+            this.vadNode = new AudioWorkletNode(this.audioContext, "vad", {
+                outputChannelCount: [1],
+                processorOptions: {
+                    sampleRate: this.audioContext.sampleRate,
+                    fftSize: 128,
+                    debug: false // Set to true for debugging
+                }
+            });
+
+            // Listen for VAD events
+            this.vadNode.port.onmessage = (event) => {
+                this.handleVADEvent(event.data);
+            };
+
+            // Create analyser for visualization
+            this.analyser = this.audioContext.createAnalyser();
+            this.analyser.fftSize = 2048;
+            this.analyser.smoothingTimeConstant = 0.8;
+
+            // Create source from microphone
+            this.source = this.audioContext.createMediaStreamSource(this.mediaStream);
+
+            // Create processor for capturing raw audio
+            this.processor = this.audioContext.createScriptProcessor(4096, 1, 1);
+            this.processor.onaudioprocess = (e) => {
+                const inputData = e.inputBuffer.getChannelData(0);
+                this.processAudioChunk(inputData);
+            };
+
+            // Connect audio graph
+            // Source -> VAD (for detection)
+            // Source -> Analyser (for visualization)
+            // Source -> Processor (for audio capture)
+            this.source.connect(this.vadNode);
+            this.source.connect(this.analyser);
+            this.source.connect(this.processor);
+            this.processor.connect(this.audioContext.destination);
+
+            // Start visualization loop
+            this.startVisualization();
+
+            return true;
+        } catch (error) {
+            console.error('Failed to initialize audio:', error);
+            throw error;
+        }
+    }
+
+    handleVADEvent(event) {
+        const cmd = event.cmd;
+        const now = Date.now();
+
+        console.log(`📢 VAD EVENT: ${cmd} at ${new Date().toLocaleTimeString()}`);
+
+        if (cmd === "speech") {
+            // Speech detected by VAD
+            console.log("✅ VAD: Speech detected");
+
+            // Clear any pending silence timer
+            if (this.silenceTimer) {
+                console.log("Clearing existing silence timer");
+                clearTimeout(this.silenceTimer);
+                this.silenceTimer = null;
+            }
+
+            if (!this.isSpeaking) {
+                // Start of speech
+                console.log("🎤 Starting new speech capture");
+                this.isSpeaking = true;
+                this.speechStartTime = now;
+                this.audioChunks = [];
+
+                if (this.onSpeechStart) {
+                    this.onSpeechStart();
+                }
+            }
+
+            this.lastSpeechTime = now;
+
+        } else if (cmd === "silence") {
+            // Silence detected by VAD
+            console.log("🔇 VAD: Silence detected");
+            console.log("Currently speaking?", this.isSpeaking);
+
+            if (this.isSpeaking) {
+                // Start silence timer
+                if (this.silenceTimer) {
+                    console.log("Clearing previous silence timer");
+                    clearTimeout(this.silenceTimer);
+                }
+
+                console.log(`⏲️ Starting ${this.silenceDuration}ms silence timer`);
+                this.silenceTimer = setTimeout(() => {
+                    const speechDurationMs = this.lastSpeechTime - this.speechStartTime;
+                    console.log(`⏰ Silence timer fired! Speech duration: ${speechDurationMs}ms`);
+
+                    // Only process if speech was long enough
+                    if (speechDurationMs >= this.minSpeechDuration) {
+                        console.log("✅ Speech long enough, ending speech");
+                        this.endSpeech();
+                    } else {
+                        // Speech was too short, discard
+                        console.log(`❌ Speech too short (${speechDurationMs}ms), discarding`);
+                        this.isSpeaking = false;
+                        this.audioChunks = [];
+                    }
+                }, this.silenceDuration);
+            } else {
+                console.log("Not currently speaking, ignoring silence event");
+            }
+        } else {
+            console.log(`⚠️ Unknown VAD command: ${cmd}`);
+        }
+    }
+
+    processAudioChunk(audioData) {
+        // Store audio chunk if we're in speech mode
+        if (this.isSpeaking) {
+            this.audioChunks.push(new Float32Array(audioData));
+            // Keep updating last speech time while we're capturing
+            this.lastSpeechTime = Date.now();
+        }
+    }
+
+    startVisualization() {
+        const updateVisuals = () => {
+            if (!this.analyser) return;
+
+            const dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+            this.analyser.getByteTimeDomainData(dataArray);
+
+            // Calculate RMS for visualization
+            let sum = 0;
+            for (let i = 0; i < dataArray.length; i++) {
+                const normalized = (dataArray[i] - 128) / 128;
+                sum += normalized * normalized;
+            }
+            const rms = Math.sqrt(sum / dataArray.length);
+            const normalized = Math.min(100, rms * 300);
+
+            if (this.onAudioLevel) {
+                this.onAudioLevel(normalized, rms);
+            }
+
+            requestAnimationFrame(updateVisuals);
+        };
+
+        updateVisuals();
+    }
+
+    endSpeech() {
+        if (this.audioChunks.length === 0) {
+            this.isSpeaking = false;
+            return;
+        }
+
+        console.log(`Processing ${this.audioChunks.length} audio chunks`);
+
+        // Combine all audio chunks
+        const totalLength = this.audioChunks.reduce((acc, chunk) => acc + chunk.length, 0);
+        const combinedAudio = new Float32Array(totalLength);
+
+        let offset = 0;
+        for (const chunk of this.audioChunks) {
+            combinedAudio.set(chunk, offset);
+            offset += chunk.length;
+        }
+
+        // Call callback with audio data
+        if (this.onSpeechEnd) {
+            this.onSpeechEnd(combinedAudio);
+        }
+
+        // Reset state
+        this.isSpeaking = false;
+        this.audioChunks = [];
+    }
+
+    updateSettings(settings) {
+        if (settings.minSpeechDuration !== undefined) {
+            this.minSpeechDuration = settings.minSpeechDuration;
+        }
+        if (settings.silenceDuration !== undefined) {
+            this.silenceDuration = settings.silenceDuration;
+        }
+    }
+
+    stop() {
+        if (this.silenceTimer) {
+            clearTimeout(this.silenceTimer);
+        }
+        if (this.processor) {
+            this.processor.disconnect();
+        }
+        if (this.analyser) {
+            this.analyser.disconnect();
+        }
+        if (this.vadNode) {
+            this.vadNode.disconnect();
+        }
+        if (this.source) {
+            this.source.disconnect();
+        }
+        if (this.audioContext) {
+            this.audioContext.close();
+        }
+        if (this.mediaStream) {
+            this.mediaStream.getTracks().forEach(track => track.stop());
+        }
+    }
+}
+
+// Audio utilities
+function float32ToWav(float32Array, sampleRate) {
+    // Convert Float32Array to WAV format
+    const buffer = new ArrayBuffer(44 + float32Array.length * 2);
+    const view = new DataView(buffer);
+
+    // WAV header
+    const writeString = (offset, string) => {
+        for (let i = 0; i < string.length; i++) {
+            view.setUint8(offset + i, string.charCodeAt(i));
+        }
+    };
+
+    writeString(0, 'RIFF');
+    view.setUint32(4, 36 + float32Array.length * 2, true);
+    writeString(8, 'WAVE');
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true); // PCM
+    view.setUint16(20, 1, true); // Linear PCM
+    view.setUint16(22, 1, true); // Mono
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeString(36, 'data');
+    view.setUint32(40, float32Array.length * 2, true);
+
+    // Convert float32 to int16
+    const volume = 0.8;
+    let offset = 44;
+    for (let i = 0; i < float32Array.length; i++) {
+        const s = Math.max(-1, Math.min(1, float32Array[i]));
+        view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+        offset += 2;
+    }
+
+    return new Blob([buffer], { type: 'audio/wav' });
+}
+
+// Main application
+class WhisperTriggerApp {
+    constructor() {
+        this.vad = null;
+        this.isRunning = false;
+        this.speechCount = 0;
+
+        // Wake word detection - will be set from UI after initializeUI()
+        this.wakeWord = "";
+        this.isAwake = false; // Whether wake word has been detected
+        this.wakeWordMode = true; // Whether to use wake word detection
+
+        this.initializeUI();
+
+        // Set wake word from UI after elements are initialized
+        this.wakeWord = this.elements.wakeWord.value;
+        console.log('Initial wake word set to:', this.wakeWord);
+
+        // Load API key from environment variable if available
+        if (import.meta.env.VITE_GROQ_API_KEY && !this.elements.apiKey.value) {
+            this.elements.apiKey.value = import.meta.env.VITE_GROQ_API_KEY;
+            console.log('✅ Loaded API key from .env');
+        }
+    }
+
+    initializeUI() {
+        this.elements = {
+            startBtn: document.getElementById('startBtn'),
+            stopBtn: document.getElementById('stopBtn'),
+            statusIndicator: document.getElementById('statusIndicator'),
+            statusText: document.getElementById('statusText'),
+            volumeFill: document.getElementById('volumeFill'),
+            audioLevel: document.getElementById('audioLevel'),
+            speechCount: document.getElementById('speechCount'),
+            transcription: document.getElementById('transcription'),
+            transcriptionText: document.getElementById('transcriptionText'),
+            commandText: document.getElementById('commandText'),
+            loading: document.getElementById('loading'),
+            threshold: document.getElementById('threshold'),
+            thresholdValue: document.getElementById('thresholdValue'),
+            minDuration: document.getElementById('minDuration'),
+            minDurationValue: document.getElementById('minDurationValue'),
+            silenceDuration: document.getElementById('silenceDuration'),
+            silenceDurationValue: document.getElementById('silenceDurationValue'),
+            wakeWordToggle: document.getElementById('wakeWordToggle'),
+            wakeWord: document.getElementById('wakeWord'),
+            wakeWordInput: document.getElementById('wakeWordInput'),
+            apiKey: document.getElementById('apiKey')
+        };
+
+        // Event listeners
+        this.elements.startBtn.addEventListener('click', () => this.start());
+        this.elements.stopBtn.addEventListener('click', () => this.stop());
+
+        // Wake word settings
+        this.elements.wakeWordToggle.addEventListener('change', (e) => {
+            this.wakeWordMode = e.target.checked;
+            this.elements.wakeWordInput.style.opacity = this.wakeWordMode ? '1' : '0.5';
+            this.elements.wakeWord.disabled = !this.wakeWordMode;
+
+            if (this.isRunning) {
+                if (this.wakeWordMode) {
+                    this.isAwake = false;
+                    this.updateStatus(`👂 Listening for "${this.wakeWord}"...`, 'listening');
+                } else {
+                    this.updateStatus('👂 Listening for speech...', 'listening');
+                }
+            }
+        });
+
+        this.elements.wakeWord.addEventListener('input', (e) => {
+            this.wakeWord = e.target.value;
+            console.log('Wake word updated to:', this.wakeWord);
+        });
+
+        // Settings - Note: threshold is not used with AudioWorklet VAD
+        // The AudioWorklet has built-in thresholds (40dB energy, 185Hz frequency, 5dB spectral flatness)
+        this.elements.threshold.addEventListener('input', (e) => {
+            this.elements.thresholdValue.textContent = e.target.value;
+            // Threshold is controlled by AudioWorklet internally
+        });
+
+        this.elements.minDuration.addEventListener('input', (e) => {
+            this.elements.minDurationValue.textContent = e.target.value;
+            if (this.vad) {
+                this.vad.updateSettings({ minSpeechDuration: parseInt(e.target.value) });
+            }
+        });
+
+        this.elements.silenceDuration.addEventListener('input', (e) => {
+            this.elements.silenceDurationValue.textContent = e.target.value;
+            if (this.vad) {
+                this.vad.updateSettings({ silenceDuration: parseInt(e.target.value) });
+            }
+        });
+
+        // Update threshold label to reflect that it's not used
+        const thresholdLabel = this.elements.threshold.parentElement.querySelector('label');
+        if (thresholdLabel) {
+            thresholdLabel.innerHTML = 'VAD Threshold: <span class="value-display" style="color: #999;">Auto (FFT-based)</span>';
+            this.elements.threshold.style.opacity = '0.5';
+            this.elements.threshold.disabled = true;
+        }
+    }
+
+    async start() {
+        try {
+            this.elements.startBtn.disabled = true;
+            this.updateStatus('Initializing...', 'listening');
+
+            // Create VAD instance
+            this.vad = new VoiceActivityDetector({
+                minSpeechDuration: parseInt(this.elements.minDuration.value),
+                silenceDuration: parseInt(this.elements.silenceDuration.value)
+            });
+
+            // Set up callbacks
+            this.vad.onSpeechStart = () => {
+                console.log('🗣️ SPEECH START detected by VAD');
+                this.updateStatus('🗣️ Speech detected!', 'speaking');
+            };
+
+            this.vad.onSpeechEnd = async (audioData) => {
+                console.log('🔇 SPEECH END detected by VAD');
+                console.log('Audio data length:', audioData.length, 'samples');
+                console.log('Audio duration:', (audioData.length / 16000).toFixed(2), 'seconds');
+
+                this.updateStatus('Processing...', 'listening');
+                this.speechCount++;
+                this.elements.speechCount.textContent = this.speechCount;
+
+                console.log('Speech count:', this.speechCount);
+                console.log('Sending to Whisper...');
+
+                await this.sendToWhisper(audioData);
+            };
+
+            this.vad.onAudioLevel = (normalized, raw) => {
+                // console.log('Audio level:', normalized.toFixed(0), 'raw:', raw.toFixed(4));
+                this.elements.audioLevel.textContent = normalized.toFixed(0);
+                this.elements.volumeFill.style.width = `${normalized}%`;
+            };
+
+            // Initialize audio
+            await this.vad.initialize();
+
+            this.isRunning = true;
+            this.updateStatus('👂 Listening for speech... (using FFT-based VAD)', 'listening');
+
+            this.elements.startBtn.style.display = 'none';
+            this.elements.stopBtn.style.display = 'block';
+
+        } catch (error) {
+            console.error('Failed to start:', error);
+            alert('Failed to start: ' + error.message);
+            this.elements.startBtn.disabled = false;
+            this.updateStatus('Error: ' + error.message, '');
+        }
+    }
+
+    stop() {
+        if (this.vad) {
+            this.vad.stop();
+            this.vad = null;
+        }
+
+        this.isRunning = false;
+        this.isAwake = false; // Reset wake word state
+        this.updateStatus('Stopped', '');
+        this.elements.startBtn.style.display = 'block';
+        this.elements.startBtn.disabled = false;
+        this.elements.stopBtn.style.display = 'none';
+        this.elements.volumeFill.style.width = '0%';
+        this.elements.audioLevel.textContent = '0';
+    }
+
+    async sendToWhisper(audioData) {
+        try {
+            this.elements.loading.classList.add('show');
+
+            console.log(`Sending ${audioData.length} samples to Whisper (${(audioData.length / 16000).toFixed(2)}s)`);
+
+            // Convert audio to WAV
+            const wavBlob = float32ToWav(audioData, 16000);
+            console.log('WAV blob size:', wavBlob.size, 'bytes');
+
+            // Create form data for Groq API
+            const formData = new FormData();
+            formData.append('file', wavBlob, 'speech.wav');
+            formData.append('model', 'whisper-large-v3-turbo');
+            formData.append('temperature', '0');
+            formData.append('response_format', 'json');
+            formData.append('language', 'en');
+
+            // Get API key from settings
+            const apiKey = this.elements.apiKey.value.trim();
+            if (!apiKey) {
+                throw new Error('Groq API key not configured. Please add your API key in settings.');
+            }
+
+            console.log('Calling Groq API...');
+
+            // Call Groq API directly from frontend
+            const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${apiKey}`
+                },
+                body: formData
+            });
+
+            console.log('Groq response status:', response.status);
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('Groq error response:', errorText);
+                throw new Error(`Groq API error ${response.status}: ${errorText}`);
+            }
+
+            const data = await response.json();
+            console.log('Groq response data:', data);
+
+            // Get transcription and remove punctuation
+            let transcription = data.text ? data.text.trim() : '';
+            transcription = transcription.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, ''); // Remove punctuation
+            transcription = transcription.replace(/\s{2,}/g, ' '); // Remove extra spaces
+            transcription = transcription.toLowerCase(); // Convert to lowercase
+
+            const transcriptionLower = transcription;
+
+            console.log('Transcription (original):', transcription);
+
+            // ALWAYS display the RAW transcription
+            if (transcription) {
+                this.displayRawTranscription(transcription);
+
+                // Check if it contains the wake word and extract command
+                const wakeWordLower = this.wakeWord.toLowerCase();
+                console.log('🔍 Checking for wake word...');
+                console.log('  Wake word:', `"${wakeWordLower}"`);
+                console.log('  Transcription:', `"${transcriptionLower}"`);
+
+                // Try exact match first
+                let wakeWordIndex = transcriptionLower.indexOf(wakeWordLower);
+                let foundWakeWord = wakeWordIndex >= 0;
+
+                // If not found, try with common prefix words (a, the, etc.)
+                if (!foundWakeWord) {
+                    const prefixes = ['a ', 'the ', 'hey ', 'ok '];
+                    for (const prefix of prefixes) {
+                        const prefixedWakeWord = prefix + wakeWordLower;
+                        wakeWordIndex = transcriptionLower.indexOf(prefixedWakeWord);
+                        if (wakeWordIndex >= 0) {
+                            wakeWordIndex += prefix.length; // Skip the prefix
+                            foundWakeWord = true;
+                            console.log(`  Found with prefix "${prefix}"`);
+                            break;
+                        }
+                    }
+                }
+
+                console.log('  Contains wake word?', foundWakeWord);
+
+                if (foundWakeWord) {
+                    const commandText = transcription.substring(wakeWordIndex + this.wakeWord.length).trim();
+
+                    console.log('  Wake word index:', wakeWordIndex);
+                    console.log('  Wake word length:', this.wakeWord.length);
+                    console.log('  Substring start:', wakeWordIndex + this.wakeWord.length);
+                    console.log('  Command text (before trim):', `"${transcription.substring(wakeWordIndex + this.wakeWord.length)}"`);
+                    console.log('  Command text (after trim):', `"${commandText}"`);
+
+                    if (commandText) {
+                        console.log('✅ Wake word found! Command:', commandText);
+                        this.displayCommand(commandText);
+                    } else {
+                        console.log('✅ Wake word found but no command after it');
+                    }
+                } else {
+                    console.log('❌ Wake word not found in transcription');
+                }
+            } else {
+                console.log('Empty transcription received');
+            }
+
+            this.updateStatus('👂 Listening for speech...', 'listening');
+
+        } catch (error) {
+            console.error('Transcription error:', error);
+            console.error('Error stack:', error.stack);
+
+            // Display error in textarea
+            const timestamp = new Date().toLocaleTimeString();
+            const currentText = this.elements.transcriptionText.value;
+            const errorLine = `[${timestamp}] ❌ ERROR: ${error.message}\n`;
+
+            this.elements.transcriptionText.value = currentText + errorLine;
+            this.elements.transcriptionText.scrollTop = this.elements.transcriptionText.scrollHeight;
+            this.elements.transcription.classList.add('show');
+
+            // Update status
+            this.updateStatus('👂 Listening for speech...', 'listening');
+        } finally {
+            this.elements.loading.classList.remove('show');
+        }
+    }
+
+    displayRawTranscription(text) {
+        if (!text) return;
+
+        const timestamp = new Date().toLocaleTimeString();
+        const currentText = this.elements.transcriptionText.value;
+        const newLine = `[${timestamp}] ${text}\n`;
+
+        this.elements.transcriptionText.value = currentText + newLine;
+        this.elements.transcriptionText.scrollTop = this.elements.transcriptionText.scrollHeight;
+        this.elements.transcription.classList.add('show');
+    }
+
+    displayCommand(text) {
+        if (!text) return;
+
+        const timestamp = new Date().toLocaleTimeString();
+        const currentText = this.elements.commandText.value;
+        const newLine = `[${timestamp}] ${text}\n`;
+
+        this.elements.commandText.value = currentText + newLine;
+        this.elements.commandText.scrollTop = this.elements.commandText.scrollHeight;
+        this.elements.transcription.classList.add('show');
+    }
+
+    updateStatus(text, state) {
+        this.elements.statusText.textContent = text;
+        this.elements.statusIndicator.className = 'status-indicator';
+        if (state) {
+            this.elements.statusIndicator.classList.add(state);
+        }
+    }
+}
+
+// Initialize app when DOM is ready
+document.addEventListener('DOMContentLoaded', () => {
+    new WhisperTriggerApp();
+});
